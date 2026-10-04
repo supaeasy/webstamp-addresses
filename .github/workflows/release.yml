@@ -44,7 +44,7 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo build --release --locked
 
-      - name: Bauen (macOS universal: Apple Silicon + Intel)
+      - name: "Bauen (macOS universal, Apple Silicon + Intel)"
         if: runner.os == 'macOS'
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
