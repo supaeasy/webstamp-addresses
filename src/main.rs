@@ -5,9 +5,9 @@ mod fonts;
 mod print;
 mod stamp;
 
-use config::Config;
+use config::{BlockCfg, Config};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use stamp::{Block, PT_PER_MM, Raster, Template};
+use stamp::{Align, Block, PT_PER_MM, Raster, Template};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -27,7 +27,9 @@ fn border() -> Color32 { pick((226, 232, 240), (51, 65, 85)) }
 fn sidebar_bg() -> Color32 { pick((241, 245, 249), (15, 23, 42)) }
 fn card_bg() -> Color32 { pick((255, 255, 255), (30, 41, 59)) }
 fn desk_bg() -> Color32 { pick((203, 213, 225), (51, 65, 85)) }
-const PLACEHOLDER: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
+
+const PLACEHOLDER_RECIPIENT: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
+const PLACEHOLDER_SENDER: &str = "Absender\nStraße 1\n12345 Ort";
 
 fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
@@ -51,6 +53,14 @@ struct Loaded {
     texture: egui::TextureHandle,
 }
 
+/// Zustand eines Schriftauswahl-Feldes (Eingabepuffer, Vorschlagsliste offen).
+#[derive(Default)]
+struct FontPicker {
+    query: String,
+    typed: bool,
+    open: bool,
+}
+
 struct App {
     cfg: Config,
     saved_json: String,
@@ -66,15 +76,14 @@ struct App {
     frames: u32,
     system_fonts: Option<fonts::SystemFonts>,
     fonts_rx: Option<std::sync::mpsc::Receiver<fonts::SystemFonts>>,
-    /// Eingabepuffer der Schriftauswahl und ob die Vorschlagsliste offen ist.
-    font_query: String,
-    font_typed: bool,
-    font_open: bool,
+    /// Schriftauswahl für Empfänger (0) und Absender (1).
+    pickers: [FontPicker; 2],
+    fonts_dirty: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_fonts(&cc.egui_ctx);
+        cc.egui_ctx.set_fonts(fonts::base_fonts());
         let cfg = Config::load();
         // Installierte Schriften im Hintergrund einlesen.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -96,9 +105,8 @@ impl App {
             frames: 0,
             system_fonts: None,
             fonts_rx: Some(rx),
-            font_query: String::new(),
-            font_typed: false,
-            font_open: false,
+            pickers: Default::default(),
+            fonts_dirty: false,
             status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
         };
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
@@ -108,97 +116,6 @@ impl App {
             }
         }
         app
-    }
-
-    /// Eingabefeld mit Autovervollständigung über alle installierten Schriftarten.
-    fn font_picker(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let Some(sf) = &self.system_fonts else {
-            ui.label(egui::RichText::new("Schriften werden geladen…").small().color(muted()));
-            return;
-        };
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut self.font_query)
-                .desired_width(190.0)
-                .hint_text("Schriftart suchen…"),
-        );
-        if resp.gained_focus() {
-            self.font_open = true;
-            self.font_typed = false;
-        }
-        if resp.changed() {
-            self.font_open = true;
-            self.font_typed = true;
-        }
-
-        let mut chosen: Option<String> = None;
-        let q = self.font_query.trim().to_lowercase();
-        let matches: Vec<&String> = if self.font_typed && !q.is_empty() {
-            let (mut pre, mut rest): (Vec<&String>, Vec<&String>) = sf
-                .families
-                .iter()
-                .filter(|f| f.to_lowercase().contains(&q))
-                .partition(|f| f.to_lowercase().starts_with(&q));
-            pre.append(&mut rest);
-            pre
-        } else {
-            sf.families.iter().collect()
-        };
-
-        if resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            chosen = sf
-                .canonical(&self.font_query)
-                .map(str::to_owned)
-                .or_else(|| matches.first().map(|s| (*s).clone()));
-            if chosen.is_none() {
-                self.font_open = false;
-            }
-        }
-
-        if self.font_open {
-            let area = egui::Area::new(egui::Id::new("font_popup"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(resp.rect.left_bottom() + Vec2::new(0.0, 2.0))
-                .show(&ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(resp.rect.width());
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                            if matches.is_empty() {
-                                ui.label(egui::RichText::new("Keine passende Schrift").color(muted()));
-                            }
-                            for name in &matches {
-                                let selected = name.as_str() == self.cfg.font;
-                                if ui.selectable_label(selected, name.as_str()).clicked() {
-                                    chosen = Some((*name).clone());
-                                }
-                            }
-                        });
-                    });
-                });
-            // Klick außerhalb schließt die Liste.
-            let outside = ctx.input(|i| {
-                i.pointer.any_click()
-                    && i.pointer
-                        .interact_pos()
-                        .is_some_and(|p| !resp.rect.contains(p) && !area.response.rect.contains(p))
-            });
-            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.font_open = false;
-            }
-        }
-
-        if let Some(name) = chosen {
-            if let Some(sf) = &self.system_fonts {
-                fonts::apply_preview_font(&ctx, sf.font_data(&name));
-            }
-            self.font_query = name.clone();
-            self.cfg.font = name;
-            self.font_open = false;
-            self.font_typed = false;
-        } else if !self.font_open && !resp.has_focus() {
-            // Ungültige Eingabe verwerfen, aktuelle Schrift wieder anzeigen.
-            self.font_query = self.cfg.font.clone();
-        }
     }
 
     fn load_template(&mut self, ctx: &egui::Context, path: &Path) {
@@ -229,21 +146,26 @@ impl App {
         }
     }
 
+    fn block(&self, idx: usize, text: &str) -> Block {
+        let c = if idx == 0 { &self.cfg.recipient } else { &self.cfg.sender_block };
+        Block {
+            text: text.to_string(),
+            pos: c.pos,
+            width_mm: c.width_mm,
+            size_pt: c.size_pt,
+            align: c.align,
+            font: c.font.clone(),
+        }
+    }
+
+    /// Die zu druckenden Blöcke (leere werden ausgelassen).
     fn blocks(&self) -> Vec<Block> {
         let mut v = vec![];
         if self.cfg.print_sender && !self.sender_text.trim().is_empty() {
-            v.push(Block {
-                text: self.sender_text.clone(),
-                pos: self.cfg.sender_pos,
-                size_pt: self.cfg.sender_size_pt,
-            });
+            v.push(self.block(1, &self.sender_text));
         }
         if !self.recipient_text.trim().is_empty() {
-            v.push(Block {
-                text: self.recipient_text.clone(),
-                pos: self.cfg.recipient_pos,
-                size_pt: self.cfg.recipient_size_pt,
-            });
+            v.push(self.block(0, &self.recipient_text));
         }
         v
     }
@@ -258,7 +180,6 @@ impl App {
             stamp: &l.raster,
             stamp_dpi: PREVIEW_DPI,
             blocks: &blocks,
-            font: &self.cfg.font,
             flip_180: self.cfg.flip_180,
             offset_mm: self.cfg.print_offset,
         };
@@ -285,10 +206,66 @@ impl App {
             .map(|s| format!("{}_umschlag.pdf", s.to_string_lossy()))
             .unwrap_or_else(|| "umschlag.pdf".into());
         if let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() {
-            self.status = match stamp::export_pdf(&l.template, &self.blocks(), &out) {
-                Ok(()) => format!("Gespeichert: {}", out.display()),
+            let sf = self.system_fonts.as_ref();
+            // Das PDF nutzt Helvetica (Arial-Metrik) – Breiten daher mit Arial messen.
+            let mut measure = |b: &Block, text: &str, bold: bool| match sf {
+                Some(sf) => sf.text_width_mm("Arial", bold, text, b.size_pt),
+                None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
+            };
+            self.status = match stamp::export_pdf(&l.template, &self.blocks(), &out, &mut measure) {
+                Ok(()) => format!("Gespeichert: {} (Schrift: Helvetica)", out.display()),
                 Err(e) => format!("Fehler: {e}"),
             };
+        }
+    }
+
+    /// Eingaben und Einstellungen eines Adressblocks (0 = Empfänger, 1 = Absender).
+    fn block_controls(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let (text, cfg) = if idx == 0 {
+            (&mut self.recipient_text, &mut self.cfg.recipient)
+        } else {
+            (&mut self.sender_text, &mut self.cfg.sender_block)
+        };
+        let enabled = idx == 0 || self.cfg.print_sender;
+        if idx == 1 {
+            ui.checkbox(&mut self.cfg.print_sender, "Absender drucken");
+        }
+
+        let (id, rows, hint) = if idx == 0 {
+            ("recipient_text", 4, "Name\nStraße Nr.\nPLZ Ort")
+        } else {
+            ("sender_text", 3, "Absender-Adresse")
+        };
+        address_editor(ui, egui::Id::new(id), text, rows, hint, enabled, &mut cfg.align);
+
+        ui.horizontal(|ui| {
+            ui.label("Schrift");
+            let changed = font_picker(
+                ui,
+                id,
+                &mut self.pickers[idx],
+                &mut cfg.font,
+                self.system_fonts.as_ref(),
+            );
+            self.fonts_dirty |= changed;
+        });
+        ui.horizontal(|ui| {
+            ui.label("Größe");
+            ui.add(egui::DragValue::new(&mut cfg.size_pt).speed(0.1).range(5.0..=40.0).suffix(" pt"));
+            ui.label("Breite");
+            ui.add(egui::DragValue::new(&mut cfg.width_mm).speed(0.5).range(20.0..=200.0).suffix(" mm"));
+        });
+
+        if idx == 1 {
+            ui.horizontal(|ui| {
+                let is_default = self.sender_text == self.cfg.sender;
+                if ui.add_enabled(!is_default, egui::Button::new("Als Standard speichern")).clicked() {
+                    self.cfg.sender = self.sender_text.clone();
+                }
+                if ui.add_enabled(!is_default, egui::Button::new("Standard laden")).clicked() {
+                    self.sender_text = self.cfg.sender.clone();
+                }
+            });
         }
     }
 
@@ -316,45 +293,17 @@ impl App {
         });
         ui.add_space(4.0);
 
-        card(ui, "Empfänger", |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.recipient_text)
-                    .desired_rows(4)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Name\nStraße Nr.\nPLZ Ort"),
-            );
-            size_row(ui, "Schriftgröße", &mut self.cfg.recipient_size_pt);
-        });
-
-        card(ui, "Absender", |ui| {
-            ui.checkbox(&mut self.cfg.print_sender, "Absender drucken");
-            ui.add_enabled(
-                self.cfg.print_sender,
-                egui::TextEdit::multiline(&mut self.sender_text)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Absender-Adresse"),
-            );
-            size_row(ui, "Schriftgröße", &mut self.cfg.sender_size_pt);
-            ui.horizontal(|ui| {
-                let is_default = self.sender_text == self.cfg.sender;
-                if ui.add_enabled(!is_default, egui::Button::new("Als Standard speichern")).clicked() {
-                    self.cfg.sender = self.sender_text.clone();
-                }
-                if ui.add_enabled(!is_default, egui::Button::new("Standard laden")).clicked() {
-                    self.sender_text = self.cfg.sender.clone();
-                }
-            });
-        });
+        card(ui, "Empfänger", |ui| self.block_controls(ui, 0));
+        card(ui, "Absender", |ui| self.block_controls(ui, 1));
 
         card(ui, "Positionen", |ui| {
             ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(muted()));
             egui::Grid::new("pos").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("Empfänger");
-                pos_drag(ui, &mut self.cfg.recipient_pos);
+                pos_drag(ui, &mut self.cfg.recipient.pos);
                 ui.end_row();
                 ui.label("Absender");
-                pos_drag(ui, &mut self.cfg.sender_pos);
+                pos_drag(ui, &mut self.cfg.sender_block.pos);
                 ui.end_row();
             });
             ui.checkbox(&mut self.cfg.show_zones, "Zonen der Schweizer Post (nur Vorschau)");
@@ -368,9 +317,8 @@ impl App {
                 });
             }
             if ui.button("Positionen zurücksetzen").clicked() {
-                let d = Config::default();
-                self.cfg.recipient_pos = d.recipient_pos;
-                self.cfg.sender_pos = d.sender_pos;
+                self.cfg.recipient.pos = BlockCfg::recipient().pos;
+                self.cfg.sender_block.pos = BlockCfg::sender().pos;
             }
         });
 
@@ -383,10 +331,6 @@ impl App {
                 ui.set_width(ui.available_width());
                 let title = egui::RichText::new("Druckeinstellungen").strong().size(14.0).color(accent());
                 egui::CollapsingHeader::new(title).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Schriftart");
-                        self.font_picker(ui);
-                    });
                     ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug)");
                     ui.horizontal(|ui| {
                         ui.label("Versatz");
@@ -474,39 +418,45 @@ impl App {
             }
             painter.text(Pos2::new(x + 4.0, env.min.y + 2.0), Align2::LEFT_TOP, format!("{:.1} mm", self.cfg.guide_v), FontId::proportional(11.0), col);
         }
-        let px_per_pt = s / PT_PER_MM;
-        let to_screen = |mm: [f32; 2]| env.min + Vec2::new(mm[0], mm[1]) * s;
 
-        let mut blocks: Vec<(&'static str, Block, bool)> = vec![];
-        let r_text = if self.recipient_text.trim().is_empty() { PLACEHOLDER } else { &self.recipient_text };
-        blocks.push((
-            "recipient",
-            Block { text: r_text.into(), pos: self.cfg.recipient_pos, size_pt: self.cfg.recipient_size_pt },
-            self.recipient_text.trim().is_empty(),
-        ));
+        let px_per_pt = s / PT_PER_MM;
+
+        // (Block-Index, Block, Platzhalter?)
+        let mut blocks: Vec<(usize, Block, bool)> = vec![];
+        let empty = self.recipient_text.trim().is_empty();
+        blocks.push((0, self.block(0, if empty { PLACEHOLDER_RECIPIENT } else { &self.recipient_text }), empty));
         if self.cfg.print_sender {
             let empty = self.sender_text.trim().is_empty();
-            let t = if empty { "Absender\nStraße 1\n12345 Ort" } else { &self.sender_text };
-            blocks.push((
-                "sender",
-                Block { text: t.into(), pos: self.cfg.sender_pos, size_pt: self.cfg.sender_size_pt },
-                empty,
-            ));
+            blocks.push((1, self.block(1, if empty { PLACEHOLDER_SENDER } else { &self.sender_text }), empty));
         }
 
-        for (id, b, ghost) in blocks {
-            let font = FontId::proportional(b.size_pt * px_per_pt);
+        for (idx, b, ghost) in blocks {
             let color = if ghost { Color32::from_gray(160) } else { Color32::BLACK };
-            let mut width = 0.0f32;
-            let top = to_screen(b.pos);
-            for (i, line) in b.text.lines().enumerate() {
-                let y = top.y + i as f32 * b.pitch_pt() * px_per_pt;
-                let r = painter.text(Pos2::new(top.x, y), Align2::LEFT_TOP, line, font.clone(), color);
-                width = width.max(r.width());
+
+            // Textbreiten aus den Vorschau-Schriften (bei 10-facher Größe gemessen, genauer).
+            let runs = stamp::layout(&b, &mut |text, bold| {
+                let g = painter.layout_no_wrap(
+                    text.to_string(),
+                    FontId::new(b.size_pt * 10.0, fonts::family(idx, bold)),
+                    Color32::BLACK,
+                );
+                g.size().x / 10.0 / PT_PER_MM
+            });
+            for r in &runs {
+                let g = painter.layout_no_wrap(
+                    r.text.clone(),
+                    FontId::new(b.size_pt * px_per_pt, fonts::family(idx, r.bold)),
+                    color,
+                );
+                let baseline = g.rows.first().and_then(|row| row.glyphs.first()).map_or(0.905 * b.size_pt * px_per_pt, |gl| gl.pos.y);
+                let at = env.min + Vec2::new(r.x_mm * s, r.baseline_mm * s - baseline);
+                painter.galley(at, g, color);
             }
-            let height = b.text.lines().count() as f32 * b.pitch_pt() * px_per_pt;
-            let hit = Rect::from_min_size(top, Vec2::new(width.max(20.0), height)).expand(4.0);
-            let resp = ui.interact(hit, egui::Id::new(id), Sense::click_and_drag());
+
+            let lines = b.text.lines().count().max(1) as f32;
+            let top = env.min + Vec2::new(b.pos[0], b.pos[1]) * s;
+            let hit = Rect::from_min_size(top, Vec2::new(b.width_mm * s, lines * b.line_height_mm() * s)).expand(4.0);
+            let resp = ui.interact(hit, egui::Id::new(("block", idx)), Sense::click_and_drag());
             if resp.hovered() || resp.dragged() {
                 painter.rect_stroke(hit, 2.0, Stroke::new(1.0, Color32::from_rgb(40, 120, 220)), egui::StrokeKind::Middle);
                 ui.ctx().set_cursor_icon(if resp.dragged() {
@@ -517,12 +467,163 @@ impl App {
             }
             if resp.dragged() {
                 let d = resp.drag_delta() / s;
-                let pos = if id == "sender" { &mut self.cfg.sender_pos } else { &mut self.cfg.recipient_pos };
+                let pos = if idx == 1 { &mut self.cfg.sender_block.pos } else { &mut self.cfg.recipient.pos };
                 pos[0] = (pos[0] + d.x).clamp(0.0, ew - 5.0);
                 pos[1] = (pos[1] + d.y).clamp(0.0, eh - 5.0);
             }
         }
     }
+}
+
+/// Mehrzeiliges Adressfeld mit Werkzeugleiste: Fett (Strg+B) und Ausrichtung.
+fn address_editor(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    rows: usize,
+    hint: &str,
+    enabled: bool,
+    align: &mut Align,
+) {
+    let ctx = ui.ctx().clone();
+    ui.horizontal(|ui| {
+        let bold_btn = ui
+            .add_enabled(enabled, egui::Button::new(egui::RichText::new("B").strong()).min_size(Vec2::new(28.0, 0.0)))
+            .on_hover_text("Markierten Text fett drucken (Strg+B)");
+        if bold_btn.clicked() {
+            bold_selection(&ctx, id, text);
+        }
+        ui.separator();
+        ui.selectable_value(align, Align::Left, "Links");
+        ui.selectable_value(align, Align::Justify, "Blocksatz");
+        ui.selectable_value(align, Align::Right, "Rechts");
+    });
+    if enabled && ctx.memory(|m| m.has_focus(id)) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)) {
+        bold_selection(&ctx, id, text);
+    }
+    ui.add_enabled(
+        enabled,
+        egui::TextEdit::multiline(text)
+            .id(id)
+            .desired_rows(rows)
+            .desired_width(f32::INFINITY)
+            .hint_text(hint),
+    );
+}
+
+/// Setzt/entfernt `**` um die aktuell markierte Auswahl des Textfeldes.
+fn bold_selection(ctx: &egui::Context, id: egui::Id, text: &mut String) {
+    let Some(mut state) = egui::TextEdit::load_state(ctx, id) else { return };
+    let Some(range) = state.cursor.char_range() else { return };
+    let (a, b) = stamp::toggle_bold(text, (range.primary.index.into(), range.secondary.index.into()));
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(a),
+        egui::text::CCursor::new(b),
+    )));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
+}
+
+/// Eingabefeld mit Autovervollständigung über alle installierten Schriftarten.
+/// Liefert `true`, wenn eine neue Schrift gewählt wurde.
+fn font_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    st: &mut FontPicker,
+    current: &mut String,
+    sf: Option<&fonts::SystemFonts>,
+) -> bool {
+    let ctx = ui.ctx().clone();
+    let Some(sf) = sf else {
+        ui.label(egui::RichText::new("Schriften werden geladen…").small().color(muted()));
+        return false;
+    };
+    if !st.open && st.query.is_empty() {
+        st.query = current.clone();
+    }
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut st.query)
+            .id_salt(("font_edit", id))
+            .desired_width(190.0)
+            .hint_text("Schriftart suchen…"),
+    );
+    if resp.gained_focus() {
+        st.open = true;
+        st.typed = false;
+    }
+    if resp.changed() {
+        st.open = true;
+        st.typed = true;
+    }
+
+    let mut chosen: Option<String> = None;
+    let q = st.query.trim().to_lowercase();
+    let matches: Vec<&String> = if st.typed && !q.is_empty() {
+        let (mut pre, mut rest): (Vec<&String>, Vec<&String>) = sf
+            .families
+            .iter()
+            .filter(|f| f.to_lowercase().contains(&q))
+            .partition(|f| f.to_lowercase().starts_with(&q));
+        pre.append(&mut rest);
+        pre
+    } else {
+        sf.families.iter().collect()
+    };
+
+    if resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        chosen = sf
+            .canonical(&st.query)
+            .map(str::to_owned)
+            .or_else(|| matches.first().map(|s| (*s).clone()));
+        if chosen.is_none() {
+            st.open = false;
+        }
+    }
+
+    if st.open {
+        let area = egui::Area::new(egui::Id::new(("font_popup", id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(resp.rect.left_bottom() + Vec2::new(0.0, 2.0))
+            .show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(resp.rect.width());
+                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.label(egui::RichText::new("Keine passende Schrift").color(muted()));
+                        }
+                        for name in &matches {
+                            if ui.selectable_label(name.as_str() == current, name.as_str()).clicked() {
+                                chosen = Some((*name).clone());
+                            }
+                        }
+                    });
+                });
+            });
+        // Klick außerhalb schließt die Liste.
+        let outside = ctx.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !resp.rect.contains(p) && !area.response.rect.contains(p))
+        });
+        if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            st.open = false;
+        }
+    }
+
+    if let Some(name) = chosen {
+        st.query = name.clone();
+        let changed = *current != name;
+        *current = name;
+        st.open = false;
+        st.typed = false;
+        return changed;
+    }
+    if !st.open && !resp.has_focus() {
+        // Ungültige Eingabe verwerfen, aktuelle Schrift wieder anzeigen.
+        st.query = current.clone();
+    }
+    false
 }
 
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
@@ -570,26 +671,9 @@ fn setup_style(ctx: &egui::Context, dark: bool) {
     });
 }
 
-fn size_row(ui: &mut egui::Ui, label: &str, v: &mut f32) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(v).speed(0.1).range(5.0..=40.0));
-    });
-}
-
 fn pos_drag(ui: &mut egui::Ui, p: &mut [f32; 2]) {
     ui.add(egui::DragValue::new(&mut p[0]).speed(0.2).prefix("x ").suffix(" mm").fixed_decimals(1));
     ui.add(egui::DragValue::new(&mut p[1]).speed(0.2).prefix("y ").suffix(" mm").fixed_decimals(1));
-}
-
-fn setup_fonts(ctx: &egui::Context) {
-    // Arial für die Vorschau, damit sie dem Druck (GDI/Arial) entspricht.
-    if let Ok(data) = std::fs::read(r"C:\Windows\Fonts\arial.ttf") {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert("arial".into(), egui::FontData::from_owned(data).into());
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "arial".into());
-        ctx.set_fonts(fonts);
-    }
 }
 
 impl eframe::App for App {
@@ -597,18 +681,31 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let dark = ui.visuals().dark_mode;
         DARK.store(dark, Ordering::Relaxed);
-        // Einmalig: Fenster so hoch öffnen, dass die linke Leiste ohne Scrollen passt.
+
+        // Installierte Schriften sind geladen: Namen normalisieren, Vorschau-Schriften setzen.
         if let Some(rx) = &self.fonts_rx {
             if let Ok(sf) = rx.try_recv() {
-                if let Some(name) = sf.canonical(&self.cfg.font).map(str::to_owned) {
-                    self.cfg.font = name;
+                for (cfg, picker) in [&mut self.cfg.recipient, &mut self.cfg.sender_block].into_iter().zip(&mut self.pickers) {
+                    if let Some(name) = sf.canonical(&cfg.font).map(str::to_owned) {
+                        cfg.font = name;
+                    }
+                    picker.query = cfg.font.clone();
                 }
-                fonts::apply_preview_font(&ctx, sf.font_data(&self.cfg.font));
-                self.font_query = self.cfg.font.clone();
                 self.system_fonts = Some(sf);
                 self.fonts_rx = None;
+                self.fonts_dirty = true;
             }
         }
+        if self.fonts_dirty {
+            fonts::apply_preview_fonts(
+                &ctx,
+                self.system_fonts.as_ref(),
+                [&self.cfg.recipient.font, &self.cfg.sender_block.font],
+            );
+            self.fonts_dirty = false;
+        }
+
+        // Einmalig: Fenster so hoch öffnen, dass die linke Leiste ohne Scrollen passt.
         self.frames += 1;
         if !self.sized && self.frames < 4 {
             ctx.request_repaint();

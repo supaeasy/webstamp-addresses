@@ -22,7 +22,6 @@ pub struct Job<'a> {
     pub stamp: &'a Raster,
     pub stamp_dpi: f32,
     pub blocks: &'a [Block],
-    pub font: &'a str,
     pub flip_180: bool,
     pub offset_mm: [f32; 2],
 }
@@ -118,36 +117,47 @@ unsafe fn draw(hdc: HDC, job: &Job) -> Result<(), String> {
             180 => 1800,
             _ => 900,
         };
-        let face = wide(job.font);
         for b in job.blocks {
+            let face = wide(&b.font);
             let height = -((b.size_pt / 72.0 * dpi_y).round() as i32);
-            let font = CreateFontW(
-                height,
-                0,
-                escapement,
-                escapement,
-                400,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_TT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                0,
-                PCWSTR(face.as_ptr()),
-            );
-            let old = SelectObject(hdc, font.into());
-            for (i, line) in b.text.lines().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let (px, py) = map(b.pos[0], b.baseline_mm(i));
-                let l: Vec<u16> = line.encode_utf16().collect();
-                let _ = TextOutW(hdc, px.round() as i32, py.round() as i32, &l);
+            let make_font = |weight: i32| {
+                CreateFontW(
+                    height,
+                    0,
+                    escapement,
+                    escapement,
+                    weight,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_TT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    0,
+                    PCWSTR(face.as_ptr()),
+                )
+            };
+            let (regular, bold) = (make_font(400), make_font(700));
+            let old = SelectObject(hdc, regular.into());
+
+            // Textbreiten mit den echten Druckerschriften messen, damit Rechtsbündig/Blocksatz stimmen.
+            let runs = crate::stamp::layout(b, &mut |s, is_bold| {
+                SelectObject(hdc, (if is_bold { bold } else { regular }).into());
+                let w: Vec<u16> = s.encode_utf16().collect();
+                let mut size = windows::Win32::Foundation::SIZE::default();
+                let _ = GetTextExtentPoint32W(hdc, &w, &mut size);
+                size.cx as f32 / mm_x
+            });
+            for r in &runs {
+                SelectObject(hdc, (if r.bold { bold } else { regular }).into());
+                let (px, py) = map(r.x_mm, r.baseline_mm);
+                let w: Vec<u16> = r.text.encode_utf16().collect();
+                let _ = TextOutW(hdc, px.round() as i32, py.round() as i32, &w);
             }
             SelectObject(hdc, old);
-            let _ = DeleteObject(font.into());
+            let _ = DeleteObject(regular.into());
+            let _ = DeleteObject(bold.into());
         }
 
         if EndPage(hdc) <= 0 {

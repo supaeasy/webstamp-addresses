@@ -1,19 +1,45 @@
+use crate::stamp::Align;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Einstellungen eines Adressblocks (Position links oben in mm).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct BlockCfg {
+    pub pos: [f32; 2],
+    /// Breite des Textfeldes in mm (Bezug für rechtsbündig und Blocksatz).
+    pub width_mm: f32,
+    pub size_pt: f32,
+    /// Schriftart (muss unter Windows installiert sein).
+    pub font: String,
+    pub align: Align,
+}
+
+impl BlockCfg {
+    pub fn recipient() -> Self {
+        Self { pos: [105.0, 85.0], width_mm: 90.0, size_pt: 12.0, font: "Arial".into(), align: Align::Left }
+    }
+
+    pub fn sender() -> Self {
+        Self { pos: [12.0, 12.0], width_mm: 70.0, size_pt: 9.0, font: "Arial".into(), align: Align::Left }
+    }
+}
+
+impl Default for BlockCfg {
+    fn default() -> Self {
+        Self::recipient()
+    }
+}
 
 /// Persistente Einstellungen (Positionen in mm, gemessen von links oben auf dem Umschlag).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// Standard-Absender (mehrzeilig).
+    /// Standard-Absender (mehrzeilig, `**fett**` möglich).
     pub sender: String,
-    pub sender_pos: [f32; 2],
-    pub sender_size_pt: f32,
     pub print_sender: bool,
-    pub recipient_pos: [f32; 2],
-    pub recipient_size_pt: f32,
-    /// Schriftart (muss unter Windows installiert sein).
-    pub font: String,
+    pub recipient: BlockCfg,
+    pub sender_block: BlockCfg,
     /// Umschlag beim Druck um 180° drehen (je nach Einzug des Druckers).
     pub flip_180: bool,
     /// Feinjustierung des Druckers in mm.
@@ -31,12 +57,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sender: String::new(),
-            sender_pos: [12.0, 12.0],
-            sender_size_pt: 9.0,
             print_sender: true,
-            recipient_pos: [105.0, 85.0],
-            recipient_size_pt: 12.0,
-            font: "Arial".into(),
+            recipient: BlockCfg::recipient(),
+            sender_block: BlockCfg::sender(),
             flip_180: false,
             print_offset: [0.0, 0.0],
             last_template: None,

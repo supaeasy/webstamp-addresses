@@ -4186,6 +4186,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "ttf-parser",
  "windows",
  "winresource",
 ]
