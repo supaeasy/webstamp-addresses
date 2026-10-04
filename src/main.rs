@@ -235,20 +235,20 @@ impl App {
             return;
         }
         let tmp = std::env::temp_dir().join("webstamp-addresses-print.pdf");
-        let result = self.write_pdf(&tmp).and_then(|_| {
+        let result = self.write_pdf(&tmp).and_then(|missing| {
             let out = std::process::Command::new("lp")
                 .args(["-o", "print-scaling=none"])
                 .arg(&tmp)
                 .output()
                 .map_err(|e| format!("„lp“ nicht verfügbar: {e}"))?;
             if out.status.success() {
-                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                Ok(format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), font_note(&missing)))
             } else {
                 Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
             }
         });
         self.status = match result {
-            Ok(msg) => format!("An den Standarddrucker gesendet ({msg}). Schrift im PDF: Helvetica."),
+            Ok(msg) => format!("An den Standarddrucker gesendet ({msg})."),
             Err(e) => format!("Druckfehler: {e}"),
         };
     }
@@ -293,24 +293,35 @@ impl App {
             .unwrap_or_else(|| "umschlag.pdf".into());
         if let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() {
             self.status = match self.write_pdf(&out) {
-                Ok(()) => format!("Gespeichert: {} (Schrift: Helvetica)", out.display()),
+                Ok(missing) => format!("Gespeichert: {}{}", out.display(), font_note(&missing)),
                 Err(e) => format!("Fehler: {e}"),
             };
         }
     }
 
     /// Schreibt Vorlage + Adressen + Bild als PDF.
-    fn write_pdf(&self, out: &Path) -> Result<(), String> {
+    /// Rückgabe: Schriften, die nicht eingebettet werden konnten (dafür gilt Helvetica).
+    fn write_pdf(&self, out: &Path) -> Result<Vec<String>, String> {
         let l = self.loaded.as_ref().ok_or("Keine Vorlage geladen")?;
         let sf = self.system_fonts.as_ref();
-        // Das PDF nutzt Helvetica – Breiten daher mit einer metrikgleichen Schrift (Arial & Co.) messen.
-        let family = sf.and_then(|s| s.helvetica_like()).unwrap_or("Arial").to_string();
+        // Breiten mit der gewählten Schrift messen; ohne Schriftdaten mit einer Helvetica-ähnlichen.
+        let fallback = sf.and_then(|s| s.helvetica_like()).unwrap_or("Arial").to_string();
+        let mut family_for: std::collections::HashMap<(String, bool), String> = Default::default();
         let mut measure = |b: &Block, text: &str, bold: bool| match sf {
-            Some(sf) => sf.text_width_mm(&family, bold, text, b.size_pt),
+            Some(sf) => {
+                let family = family_for
+                    .entry((b.font.clone(), bold))
+                    .or_insert_with(|| {
+                        if sf.font_data(&b.font, bold).is_some() { b.font.clone() } else { fallback.clone() }
+                    })
+                    .clone();
+                sf.text_width_mm(&family, bold, text, b.size_pt)
+            }
             None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
         };
+        let face = |family: &str, bold: bool| sf.and_then(|s| s.font_data(family, bold));
         let images = placed(&self.image, &self.cfg.image);
-        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &mut measure)
+        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &mut measure, &face)
     }
 
     /// Eingaben und Einstellungen eines Adressblocks (0 = Empfänger, 1 = Absender).
@@ -631,6 +642,15 @@ impl App {
                 pos[1] = (pos[1] + d.y).clamp(0.0, eh - 5.0);
             }
         }
+    }
+}
+
+/// Hinweis für die Statusleiste, wenn Schriften nicht eingebettet werden konnten.
+fn font_note(missing: &[String]) -> String {
+    if missing.is_empty() {
+        " – Schrift eingebettet".into()
+    } else {
+        format!(" – Ersatzschrift Helvetica für: {}", missing.join(", "))
     }
 }
 

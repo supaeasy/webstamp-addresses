@@ -19,7 +19,7 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 - **Zonen der Schweizer Post** (nur Vorschau, hellblau): Frankierzone, Absenderzone, Codierzone und Lesezone nach den [Spezifikationen Briefgestaltung](https://www.post.ch/briefgestaltung) der Post (Format bis B5, quer), damit Adressen maschinenlesbar platziert werden.
 - **Hilfslinien:** eine horizontale und eine vertikale Linie, frei verschiebbar (nur Vorschau, werden nicht gedruckt).
 - **Direktdruck** über den Windows-Druckdialog (Drucker und Papierformat C5 wählbar). Der Umschlag wird bei Hochformat-Einzug automatisch gedreht; zusätzlich „180° drehen“ und ein Feinversatz in mm für die Druckerjustage.
-- **Als PDF speichern** zur Kontrolle vor dem Druck.
+- **Als PDF speichern** zur Kontrolle vor dem Druck. Die gewählten Schriften werden als Teilschrift eingebettet (Text bleibt durchsuchbar); fehlt eine Schrift, wird Helvetica verwendet und in der Statusleiste gemeldet.
 - **Schrift, Ausrichtung und Breite pro Adressfeld:** Empfänger und Absender haben je eigene Schriftart (Auswahlfeld mit Autovervollständigung über alle installierten Schriften), Größe, Textbreite sowie Ausrichtung *Links*, *Blocksatz* oder *Rechts*.
 - **Fettdruck:** Text markieren und Strg+B (oder Button **B**) drücken – fette Teile werden im Text als `**fett**` markiert und gedruckt.
 - **Hell-/Dunkelmodus:** folgt automatisch dem Windows-Design.
@@ -44,7 +44,7 @@ Fertige Programme (Windows x64, Linux x64, macOS universal) gibt es unter [Relea
 |---|---|---|
 | Vorschau, Adressen, Bild, Zonen | ✔ | ✔ |
 | Als PDF speichern | ✔ | ✔ |
-| Drucken | direkt über den Windows-Druckdialog (GDI, gewählte Schrift) | PDF wird per CUPS (`lp`) an den **Standarddrucker** gesendet; Schrift im PDF ist Helvetica |
+| Drucken | direkt über den Windows-Druckdialog (GDI, gewählte Schrift) | PDF (mit eingebetteter gewählter Schrift) wird per CUPS (`lp`) an den **Standarddrucker** gesendet |
 
 macOS/Linux sind bisher nur gebaut, aber nicht auf echter Hardware getestet. Unter macOS ist die Datei nicht signiert (ggf. Rechtsklick → Öffnen bzw. `xattr -d com.apple.quarantine webstamp-addresses`).
 
@@ -82,7 +82,7 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 - **Swiss Post zones** (preview only, light blue): franking, sender, coding and reading zone according to the Post's [letter design specifications](https://www.post.ch/briefgestaltung) (format up to B5, landscape), so addresses are placed machine-readably.
 - **Guide lines:** one horizontal and one vertical line, freely movable (preview only, never printed).
 - **Direct printing** through the Windows print dialog (choose printer and paper size C5). The envelope is rotated automatically for portrait paper feeds; there is also a “rotate 180°” option and a fine offset in mm for printer calibration.
-- **Save as PDF** to check the result before printing.
+- **Save as PDF** to check the result before printing. The selected fonts are embedded as subsets (text stays searchable); if a font is missing, Helvetica is used and reported in the status bar.
 - **Font, alignment and width per address field:** recipient and sender each have their own font (search-as-you-type picker over all installed fonts), size, text width and alignment *left*, *justified* or *right*.
 - **Bold text:** select text and press Ctrl+B (or the **B** button) – bold parts are marked as `**bold**` in the text and printed bold.
 - **Light/dark mode:** follows the Windows theme automatically.
@@ -107,7 +107,7 @@ Prebuilt binaries (Windows x64, Linux x64, macOS universal) are available under 
 |---|---|---|
 | Preview, addresses, image, zones | ✔ | ✔ |
 | Save as PDF | ✔ | ✔ |
-| Printing | directly via the Windows print dialog (GDI, selected font) | the PDF is sent to the **default printer** via CUPS (`lp`); the PDF uses Helvetica |
+| Printing | directly via the Windows print dialog (GDI, selected font) | the PDF (with the selected font embedded) is sent to the **default printer** via CUPS (`lp`) |
 
 macOS/Linux builds are so far only compiled, not tested on real hardware. On macOS the binary is unsigned (right-click → Open, or `xattr -d com.apple.quarantine webstamp-addresses`).
 

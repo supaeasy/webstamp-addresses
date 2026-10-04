@@ -4,6 +4,7 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use lopdf::{Document, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 pub const PT_PER_MM: f32 = 72.0 / 25.4;
@@ -230,27 +231,65 @@ pub fn render_template(t: &Template, dpi: f32) -> Result<Raster, String> {
     })
 }
 
-/// Schreibt Vorlage + Adressen als PDF. Verwendet Helvetica / Helvetica-Bold (nicht die gewählte
-/// Schrift); `measure(block, text, fett)` liefert die Textbreite in mm.
+/// Liefert die Schriftdaten (Bytes, Index in der Collection) zu Familie und Fett.
+pub type FaceFn<'a> = &'a dyn Fn(&str, bool) -> Option<(Vec<u8>, u32)>;
+
+/// Schreibt Vorlage + Adressen + Bilder als PDF. Die gewählten Schriften werden als Teilschrift
+/// (nur die benutzten Zeichen) eingebettet; fehlt eine Schrift, wird Helvetica verwendet.
+/// `measure(block, text, fett)` liefert die Textbreite in mm. Rückgabe: Familien ohne Schriftdaten.
 pub fn export_pdf(
     t: &Template,
     blocks: &[Block],
     images: &[Placed],
     out: &Path,
     measure: &mut dyn FnMut(&Block, &str, bool) -> f32,
-) -> Result<(), String> {
+    face: FaceFn,
+) -> Result<Vec<String>, String> {
     let mut doc = Document::load_mem(&t.bytes).map_err(|e| e.to_string())?;
     let page_id = *doc.get_pages().values().next().ok_or("keine Seite")?;
     let page_h_pt = t.height_mm * PT_PER_MM;
 
-    let font_regular = doc.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
-    });
-    let font_bold = doc.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold", "Encoding" => "WinAnsiEncoding",
-    });
+    // 1. Layout aller Blöcke und benutzte Zeichen je (Schrift, fett)
+    let layouts: Vec<Vec<Run>> = blocks
+        .iter()
+        .map(|b| layout(b, &mut |text, bold| measure(b, text, bold)))
+        .collect();
+    let mut used: BTreeMap<(String, bool), BTreeSet<char>> = BTreeMap::new();
+    for (b, runs) in blocks.iter().zip(&layouts) {
+        for r in runs {
+            used.entry((b.font.clone(), r.bold)).or_default().extend(r.text.chars());
+        }
+    }
 
-    // Resources ggf. aus Referenz/Vererbung in die Seite holen und Fonts ergänzen.
+    // 2. Schriften einbetten
+    let mut fonts = dictionary! {};
+    let mut embedded: HashMap<(String, bool), (String, HashMap<char, u16>)> = HashMap::new();
+    let mut missing: Vec<String> = vec![];
+    for (n, ((family, bold), chars)) in used.iter().enumerate() {
+        let done = face(family, *bold)
+            .and_then(|(data, index)| embed_font(&mut doc, &data, index, chars, family));
+        match done {
+            Some((id, map)) => {
+                let name = format!("FE{n}");
+                fonts.set(name.as_bytes().to_vec(), Object::Reference(id));
+                embedded.insert((family.clone(), *bold), (name, map));
+            }
+            None if !missing.contains(family) => missing.push(family.clone()),
+            None => {}
+        }
+    }
+
+    // Helvetica als Rückfall
+    let helv = |doc: &mut Document, base: &str| {
+        doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base, "Encoding" => "WinAnsiEncoding",
+        })
+    };
+    let (helv_regular, helv_bold) = (helv(&mut doc, "Helvetica"), helv(&mut doc, "Helvetica-Bold"));
+    fonts.set("FEnv", Object::Reference(helv_regular));
+    fonts.set("FEnvB", Object::Reference(helv_bold));
+
+    // 3. Resources der Seite ergänzen (Fonts, Bilder)
     let mut res = match doc.get_page_resources(page_id) {
         Ok((Some(d), _)) => d.clone(),
         Ok((None, ids)) => ids
@@ -259,14 +298,15 @@ pub fn export_pdf(
             .unwrap_or_default(),
         Err(_) => Default::default(),
     };
-    let mut fonts = match res.get(b"Font") {
+    let mut page_fonts = match res.get(b"Font") {
         Ok(Object::Dictionary(d)) => d.clone(),
         Ok(Object::Reference(id)) => doc.get_dictionary(*id).cloned().unwrap_or_default(),
         _ => Default::default(),
     };
-    fonts.set("FEnv", Object::Reference(font_regular));
-    fonts.set("FEnvB", Object::Reference(font_bold));
-    res.set("Font", Object::Dictionary(fonts));
+    for (k, v) in fonts.iter() {
+        page_fonts.set(k.clone(), v.clone());
+    }
+    res.set("Font", Object::Dictionary(page_fonts));
 
     // Bilder als RGB-XObjects (Transparenz auf Weiß gerechnet, auf max. 2400 px begrenzt).
     let mut xobjects = match res.get(b"XObject") {
@@ -306,15 +346,25 @@ pub fn export_pdf(
         .map_err(|e| e.to_string())?
         .set("Resources", Object::Dictionary(res));
 
-    for b in blocks {
-        for r in layout(b, &mut |text, bold| measure(b, text, bold)) {
+    // 4. Text
+    for (b, runs) in blocks.iter().zip(&layouts) {
+        for r in runs {
+            let (name, shown) = match embedded.get(&(b.font.clone(), r.bold)) {
+                Some((name, map)) => {
+                    let hex: String = r
+                        .text
+                        .chars()
+                        .map(|c| format!("{:04X}", map.get(&c).copied().unwrap_or(0)))
+                        .collect();
+                    (name.as_str(), format!("<{hex}>"))
+                }
+                None => (if r.bold { "FEnvB" } else { "FEnv" }, pdf_string(&r.text)),
+            };
             content.push_str(&format!(
-                "BT /{} {} Tf {:.2} {:.2} Td {} Tj ET\n",
-                if r.bold { "FEnvB" } else { "FEnv" },
+                "BT /{name} {} Tf {:.2} {:.2} Td {shown} Tj ET\n",
                 b.size_pt,
                 r.x_mm * PT_PER_MM,
                 page_h_pt - r.baseline_mm * PT_PER_MM,
-                pdf_string(&r.text)
             ));
         }
     }
@@ -331,7 +381,127 @@ pub fn export_pdf(
     page.set("Contents", Object::Array(contents));
 
     doc.save(out).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(missing)
+}
+
+/// Bettet eine Teilschrift als Type0/Identity-H-Font ein. Liefert das Font-Objekt und die
+/// Zuordnung Zeichen → neue Glyph-ID (= CID).
+fn embed_font(
+    doc: &mut Document,
+    data: &[u8],
+    index: u32,
+    chars: &BTreeSet<char>,
+    family: &str,
+) -> Option<(lopdf::ObjectId, HashMap<char, u16>)> {
+    let face = ttf_parser::Face::parse(data, index).ok()?;
+    let k = 1000.0 / face.units_per_em() as f32;
+
+    let mut remapper = subsetter::GlyphRemapper::new();
+    remapper.remap(0); // .notdef
+    let old: Vec<(char, u16)> = chars
+        .iter()
+        .map(|&c| (c, face.glyph_index(c).map_or(0, |g| g.0)))
+        .collect();
+    for (_, g) in &old {
+        remapper.remap(*g);
+    }
+    let subset = subsetter::subset(data, index, &remapper).ok()?;
+
+    let mut map = HashMap::new();
+    let mut widths: BTreeMap<u16, i64> = BTreeMap::new();
+    for (c, g) in &old {
+        let new = remapper.get(*g)?;
+        map.insert(*c, new);
+        let adv = face.glyph_hor_advance(ttf_parser::GlyphId(*g)).unwrap_or(0) as f32 * k;
+        widths.insert(new, adv.round() as i64);
+    }
+    let mut w = vec![];
+    for (gid, adv) in widths {
+        w.push(Object::Integer(gid as i64));
+        w.push(Object::Array(vec![Object::Integer(adv)]));
+    }
+
+    let cff = face.tables().cff.is_some();
+    let mut file = Stream::new(
+        if cff { dictionary! { "Subtype" => "OpenType" } } else { dictionary! { "Length1" => subset.len() as i64 } },
+        subset,
+    );
+    let _ = file.compress();
+    let file_id = doc.add_object(file);
+
+    let clean: String = family.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let base = format!("AAAAAA+{}", if clean.is_empty() { "Font".into() } else { clean });
+    let bb = face.global_bounding_box();
+    let scaled = |v: i16| Object::Integer((v as f32 * k).round() as i64);
+    let ascent = face.ascender();
+    let mut descriptor = dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => Object::Name(base.clone().into_bytes()),
+        "Flags" => 32,
+        "FontBBox" => vec![scaled(bb.x_min), scaled(bb.y_min), scaled(bb.x_max), scaled(bb.y_max)],
+        "ItalicAngle" => 0,
+        "Ascent" => scaled(ascent),
+        "Descent" => scaled(face.descender()),
+        "CapHeight" => scaled(face.capital_height().unwrap_or(ascent)),
+        "StemV" => 80,
+    };
+    descriptor.set(if cff { "FontFile3" } else { "FontFile2" }, Object::Reference(file_id));
+    let descriptor_id = doc.add_object(descriptor);
+
+    let mut cid_font = dictionary! {
+        "Type" => "Font",
+        "Subtype" => if cff { "CIDFontType0" } else { "CIDFontType2" },
+        "BaseFont" => Object::Name(base.clone().into_bytes()),
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => Object::Reference(descriptor_id),
+        "DW" => 0,
+        "W" => Object::Array(w),
+    };
+    if !cff {
+        cid_font.set("CIDToGIDMap", "Identity");
+    }
+    let cid_id = doc.add_object(cid_font);
+
+    let mut to_unicode = Stream::new(dictionary! {}, to_unicode_cmap(&map).into_bytes());
+    let _ = to_unicode.compress();
+    let to_unicode_id = doc.add_object(to_unicode);
+
+    let type0 = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => Object::Name(base.into_bytes()),
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(cid_id)],
+        "ToUnicode" => Object::Reference(to_unicode_id),
+    });
+    Some((type0, map))
+}
+
+/// ToUnicode-CMap, damit Text im PDF durchsuchbar/kopierbar bleibt.
+fn to_unicode_cmap(map: &HashMap<char, u16>) -> String {
+    let mut pairs: Vec<(u16, char)> = map.iter().map(|(c, g)| (*g, *c)).filter(|(g, _)| *g != 0).collect();
+    pairs.sort();
+    let mut s = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+    );
+    for chunk in pairs.chunks(100) {
+        s.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (gid, c) in chunk {
+            let mut buf = [0u16; 2];
+            let utf16: String = c.encode_utf16(&mut buf).iter().map(|u| format!("{u:04X}")).collect();
+            s.push_str(&format!("<{gid:04X}> <{utf16}>\n"));
+        }
+        s.push_str("endbfchar\n");
+    }
+    s.push_str("endcmap CMapName currentdict /CMap defineresource pop end end\n");
+    s
 }
 
 fn pdf_string(s: &str) -> String {
@@ -353,7 +523,10 @@ fn pdf_string(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r"sample-stamp.pdf";
+    /// Pfad zu einer echten Webstamp-PDF für manuelle Tests (Umgebungsvariable `WEBSTAMP_SAMPLE`).
+    fn sample() -> Option<std::path::PathBuf> {
+        std::env::var_os("WEBSTAMP_SAMPLE").map(Into::into)
+    }
 
     fn block(text: &str, align: Align) -> Block {
         Block { text: text.into(), pos: [10.0, 20.0], width_mm: 100.0, size_pt: 12.0, align, font: "Arial".into() }
@@ -402,9 +575,87 @@ mod tests {
         assert_eq!(t, "**a**\n**b**");
     }
 
+    fn blank_template() -> Template {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 649.into(), 459.into()],
+            "Resources" => dictionary! {},
+        });
+        doc.objects.insert(
+            pages_id,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }.into(),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = vec![];
+        doc.save_to(&mut bytes).unwrap();
+        Template { bytes, width_mm: 229.0, height_mm: 162.0 }
+    }
+
+    #[test]
+    fn embeds_subset_font() {
+        let sf = crate::fonts::SystemFonts::load();
+        let Some(family) = sf.helvetica_like().map(str::to_owned) else { return };
+        let mut b = block("Ärger **GmbH**\nMüllerstraße 5", Align::Right);
+        b.font = family.clone();
+        let out = std::env::temp_dir().join("env_embed_test.pdf");
+        let missing = export_pdf(
+            &blank_template(),
+            &[b],
+            &[],
+            &out,
+            &mut |_, s, bold| m(s, bold),
+            &|f, bold| sf.font_data(f, bold),
+        )
+        .unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+
+        // Die Teilschrift ist eingebettet und deutlich kleiner als die ganze Schrift.
+        let doc = Document::load(&out).unwrap();
+        let embedded: Vec<usize> = doc
+            .objects
+            .values()
+            .filter_map(|o| match o {
+                Object::Stream(s) if s.dict.has(b"Length1") || s.dict.has(b"Subtype") => Some(s.content.len()),
+                _ => None,
+            })
+            .collect();
+        assert!(!embedded.is_empty(), "keine eingebettete Schrift gefunden");
+        assert!(embedded.iter().all(|&n| n < 200_000), "Teilschrift zu groß: {embedded:?}");
+    }
+
+    /// Manuelle Prüfung mit echter Vorlage und mehreren Systemschriften (`cargo test -- --ignored`).
+    #[test]
+    #[ignore]
+    fn export_real_fonts() {
+        let sf = crate::fonts::SystemFonts::load();
+        let Some(sample) = sample() else { return };
+        let t = load(&sample).unwrap();
+        let families = ["Times New Roman", "Verdana", "Georgia", "Consolas", "Segoe UI", "Bahnschrift"];
+        let blocks: Vec<Block> = families
+            .iter()
+            .enumerate()
+            .map(|(i, f)| Block {
+                text: format!("{f}: **Ärger GmbH** €\nMüllerstraße 5, 12345 Köln"),
+                pos: [12.0, 20.0 + i as f32 * 20.0],
+                width_mm: 110.0,
+                size_pt: 12.0,
+                align: if i % 3 == 0 { Align::Left } else if i % 3 == 1 { Align::Right } else { Align::Justify },
+                font: f.to_string(),
+            })
+            .collect();
+        let out = std::env::temp_dir().join("env_fonts_test.pdf");
+        let mut measure = |b: &Block, s: &str, bold: bool| sf.text_width_mm(&b.font, bold, s, b.size_pt);
+        let missing = export_pdf(&t, &blocks, &[], &out, &mut measure, &|f, b| sf.font_data(f, b)).unwrap();
+        println!("fehlend: {missing:?} → {}", out.display());
+    }
+
     #[test]
     fn render_and_export() {
-        let t = load(Path::new(SAMPLE)).unwrap();
+        let Some(sample) = sample() else { return };
+        let t = load(&sample).unwrap();
         assert!((t.width_mm - 229.0).abs() < 1.0 && (t.height_mm - 162.0).abs() < 1.0);
         let r = render_template(&t, 150.0).unwrap();
         let dark = r.rgba.chunks(4).filter(|p| p[0] < 128).count();
@@ -414,7 +665,9 @@ mod tests {
         let img = crate::graphic::Graphic::Raster(image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255])));
         let placed = [Placed { img: &img, pos: [12.0, 100.0], width_mm: 40.0 }];
         assert_eq!(placed[0].height_mm(), 20.0);
-        export_pdf(&t, &blocks, &placed, &out, &mut |_, s, bold| m(s, bold)).unwrap();
+        // ohne Schriftdaten → Helvetica-Rückfall, Familie wird gemeldet
+        let missing = export_pdf(&t, &blocks, &placed, &out, &mut |_, s, bold| m(s, bold), &|_, _| None).unwrap();
+        assert_eq!(missing, vec!["Arial".to_string()]);
         println!("{}", out.display());
     }
 }
