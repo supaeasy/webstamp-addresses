@@ -31,7 +31,7 @@ const PLACEHOLDER: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
 fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 700.0])
+            .with_inner_size([1100.0, 900.0])
             .with_icon(window_icon())
             .with_drag_and_drop(true),
         ..Default::default()
@@ -59,6 +59,10 @@ struct App {
     print_state: print::PrintState,
     status: String,
     applied_dark: Option<bool>,
+    /// Höhe des Inhalts der linken Leiste (für die Start-Fenstergröße).
+    content_h: f32,
+    sized: bool,
+    frames: u32,
 }
 
 impl App {
@@ -73,6 +77,9 @@ impl App {
             loaded: None,
             print_state: Default::default(),
             applied_dark: None,
+            content_h: 0.0,
+            sized: false,
+            frames: 0,
             status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
         };
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
@@ -177,7 +184,6 @@ impl App {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let have = self.loaded.is_some();
 
         // Kopfbereich
         ui.horizontal(|ui| {
@@ -203,7 +209,7 @@ impl App {
         card(ui, "Empfänger", |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut self.recipient_text)
-                    .desired_rows(5)
+                    .desired_rows(4)
                     .desired_width(f32::INFINITY)
                     .hint_text("Name\nStraße Nr.\nPLZ Ort"),
             );
@@ -215,7 +221,7 @@ impl App {
             ui.add_enabled(
                 self.cfg.print_sender,
                 egui::TextEdit::multiline(&mut self.sender_text)
-                    .desired_rows(4)
+                    .desired_rows(3)
                     .desired_width(f32::INFINITY)
                     .hint_text("Absender-Adresse"),
             );
@@ -258,32 +264,28 @@ impl App {
             }
         });
 
-        card(ui, "Druckeinstellungen", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Schriftart");
-                ui.add(egui::TextEdit::singleline(&mut self.cfg.font).desired_width(140.0));
+        egui::Frame::new()
+            .fill(card_bg())
+            .stroke(Stroke::new(1.0, border()))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let title = egui::RichText::new("Druckeinstellungen").strong().size(14.0).color(accent());
+                egui::CollapsingHeader::new(title).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Schriftart");
+                        ui.add(egui::TextEdit::singleline(&mut self.cfg.font).desired_width(140.0));
+                    });
+                    ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug)");
+                    ui.horizontal(|ui| {
+                        ui.label("Versatz");
+                        ui.add(egui::DragValue::new(&mut self.cfg.print_offset[0]).speed(0.1).prefix("x ").suffix(" mm"));
+                        ui.add(egui::DragValue::new(&mut self.cfg.print_offset[1]).speed(0.1).prefix("y ").suffix(" mm"));
+                    });
+                    ui.label(egui::RichText::new("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.").small().color(muted()));
+                });
             });
-            ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug)");
-            ui.horizontal(|ui| {
-                ui.label("Versatz");
-                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[0]).speed(0.1).prefix("x ").suffix(" mm"));
-                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[1]).speed(0.1).prefix("y ").suffix(" mm"));
-            });
-            ui.label(egui::RichText::new("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.").small().color(muted()));
-        });
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let print_btn = egui::Button::new(egui::RichText::new("Drucken…").strong().color(Color32::WHITE))
-                .fill(BUTTON_BLUE)
-                .min_size(Vec2::new(140.0, 36.0));
-            if ui.add_enabled(have, print_btn).clicked() {
-                self.do_print();
-            }
-            if ui.add_enabled(have, egui::Button::new("Als PDF speichern…").min_size(Vec2::new(0.0, 36.0))).clicked() {
-                self.save_pdf();
-            }
-        });
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
@@ -485,6 +487,24 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let dark = ui.visuals().dark_mode;
         DARK.store(dark, Ordering::Relaxed);
+        // Einmalig: Fenster so hoch öffnen, dass die linke Leiste ohne Scrollen passt.
+        self.frames += 1;
+        if !self.sized && self.frames < 4 {
+            ctx.request_repaint();
+        }
+        if !self.sized && self.frames >= 4 && self.content_h > 0.0 {
+            self.sized = true;
+            // monitor_size wird unter Windows in physischen Pixeln geliefert → in Punkte umrechnen.
+            let monitor = ctx
+                .input(|i| i.viewport().monitor_size)
+                .map_or(Vec2::new(1280.0, 720.0), |m| m / ctx.pixels_per_point());
+            let want = self.content_h + 24.0 + 56.0; // Rand + untere Leiste
+            let size = Vec2::new(1180.0f32.min(monitor.x - 40.0), want.min(monitor.y - 80.0).max(600.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            // Oben mittig platzieren (Titelleiste ~40 pt).
+            let pos = Pos2::new(((monitor.x - size.x) / 2.0).max(0.0), ((monitor.y - size.y - 40.0) / 2.0).max(0.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
         if self.applied_dark != Some(dark) {
             setup_style(&ctx, dark);
             self.applied_dark = Some(dark);
@@ -501,13 +521,27 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(&self.status).small().color(muted()));
+                ui.horizontal(|ui| {
+                    let have = self.loaded.is_some();
+                    let print_btn = egui::Button::new(egui::RichText::new("Drucken…").strong().color(Color32::WHITE))
+                        .fill(BUTTON_BLUE)
+                        .min_size(Vec2::new(130.0, 32.0));
+                    if ui.add_enabled(have, print_btn).clicked() {
+                        self.do_print();
+                    }
+                    if ui.add_enabled(have, egui::Button::new("Als PDF speichern…").min_size(Vec2::new(0.0, 32.0))).clicked() {
+                        self.save_pdf();
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(&self.status).small().color(muted()));
+                });
             });
         egui::Panel::left("controls")
             .min_size(340.0)
             .frame(egui::Frame::new().fill(sidebar_bg()).inner_margin(12))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
+                let out = egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
+                self.content_h = out.content_size.y;
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(desk_bg()))
