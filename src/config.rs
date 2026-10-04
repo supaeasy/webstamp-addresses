@@ -23,6 +23,8 @@ pub struct Config {
     pub show_guides: bool,
     pub guide_h: f32,
     pub guide_v: f32,
+    /// Zonen der Schweizer Post (nur Vorschau).
+    pub show_zones: bool,
 }
 
 impl Default for Config {
@@ -41,6 +43,7 @@ impl Default for Config {
             show_guides: false,
             guide_h: 80.0,
             guide_v: 110.0,
+            show_zones: true,
         }
     }
 }

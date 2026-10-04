@@ -241,6 +241,7 @@ impl App {
                 pos_drag(ui, &mut self.cfg.sender_pos);
                 ui.end_row();
             });
+            ui.checkbox(&mut self.cfg.show_zones, "Zonen der Schweizer Post (nur Vorschau)");
             ui.checkbox(&mut self.cfg.show_guides, "Hilfslinien (nur Vorschau)");
             if self.cfg.show_guides {
                 ui.horizontal(|ui| {
@@ -312,6 +313,28 @@ impl App {
             Color32::WHITE,
         );
         painter.rect_stroke(env, 0.0, Stroke::new(1.0, Color32::GRAY), egui::StrokeKind::Middle);
+
+        if self.cfg.show_zones {
+            // Swiss Post, „Spezifikationen Briefgestaltung“ (Format bis B5, quer), Maße in mm.
+            let blue = Color32::from_rgb(56, 140, 235);
+            let fill = Color32::from_rgba_unmultiplied(56, 140, 235, 45);
+            let rect_mm = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                Rect::from_min_max(env.min + Vec2::new(x0, y0) * s, env.min + Vec2::new(x1, y1) * s)
+            };
+            let zones = [
+                ("Frankierzone", rect_mm(ew - 74.0, 0.0, ew, 38.0), true),
+                ("Absenderzone", rect_mm(0.0, 0.0, 120.0, 40.0), true),
+                ("Codierzone (frei lassen)", rect_mm(ew - 140.0, eh - 15.0, ew, eh), true),
+                ("Lesezone: Empfängeradresse hier hinein", rect_mm(12.0, 40.0, ew - 12.0, eh - 15.0), false),
+            ];
+            for (label, r, filled) in zones {
+                if filled {
+                    painter.rect_filled(r, 0.0, fill);
+                }
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, blue), egui::StrokeKind::Inside);
+                painter.text(r.min + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, label, FontId::proportional(11.0), blue);
+            }
+        }
 
         if self.cfg.show_guides {
             let col = Color32::from_rgb(230, 60, 200);
