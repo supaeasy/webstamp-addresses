@@ -1,13 +1,42 @@
-//! Installierte Schriftarten: Liste für die Auswahl, Schriftdaten für die Vorschau, Textbreiten.
+//! Installierte Schriftarten: erlaubte Schriften für die Auswahl, Schriftdaten für Vorschau und PDF,
+//! Schriftmetriken für den vorgeschriebenen Zeilenabstand.
 
-use crate::stamp::PT_PER_MM;
 use eframe::egui;
 use fontdb::{Database, Family, Query, Weight};
 
+/// Grotesk-Schriften, wie sie die Post für Adressen wünscht („Grotesk wie Frutiger, Arial,
+/// Helvetica, Univers usw.“), dazu metrikgleiche Verwandte und Verdana (laut Post für den
+/// PP-Vermerk erlaubt). Es zählt der Anfang des Familiennamens.
+const ALLOWED_BASES: &[&str] = &[
+    "arial",
+    "arial nova",
+    "helvetica",
+    "helvetica neue",
+    "frutiger",
+    "univers",
+    "akzidenz-grotesk",
+    "neue haas grotesk",
+    "nimbus sans",
+    "liberation sans",
+    "arimo",
+    "verdana",
+];
+
+/// Varianten, die verzerrt, zusammengestaucht oder Zierschriften sind, bleiben ausgeschlossen.
+const EXCLUDED_WORDS: &[&str] = &["narrow", "condensed", "cond", "compressed", "black", "rounded", "mono", "extra", "ultra", "outline"];
+
+pub fn is_allowed_family(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if EXCLUDED_WORDS.iter().any(|w| n.split(|c: char| !c.is_alphanumeric()).any(|p| p == *w)) {
+        return false;
+    }
+    ALLOWED_BASES.iter().any(|b| n == *b || (n.starts_with(b) && n[b.len()..].starts_with(' ')))
+}
+
 pub struct SystemFonts {
     db: Database,
-    /// Alphabetisch sortierte, eindeutige Familiennamen.
-    pub families: Vec<String>,
+    /// Davon die für Adressen erlaubten Grotesk-Schriften.
+    pub allowed: Vec<String>,
 }
 
 impl SystemFonts {
@@ -21,63 +50,54 @@ impl SystemFonts {
             .collect();
         families.sort_by_key(|n| n.to_lowercase());
         families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        Self { db, families }
+        let allowed = families.iter().filter(|n| is_allowed_family(n)).cloned().collect();
+        Self { db, allowed }
     }
 
-    /// Schreibweise des installierten Namens (unabhängig von Groß-/Kleinschreibung).
-    pub fn canonical(&self, name: &str) -> Option<&str> {
-        self.families.iter().map(String::as_str).find(|f| f.eq_ignore_ascii_case(name.trim()))
+    /// Schreibweise des installierten, erlaubten Namens (unabhängig von Groß-/Kleinschreibung).
+    pub fn canonical_allowed(&self, name: &str) -> Option<&str> {
+        self.allowed.iter().map(String::as_str).find(|f| f.eq_ignore_ascii_case(name.trim()))
     }
 
-    /// Eine installierte Schrift mit Helvetica-Metrik (für Textbreiten im PDF-Export).
-    pub fn helvetica_like(&self) -> Option<&str> {
-        ["Arial", "Liberation Sans", "Helvetica", "Helvetica Neue", "Nimbus Sans", "Nimbus Sans L", "Arimo", "DejaVu Sans"]
-            .into_iter()
-            .find_map(|n| self.canonical(n))
+    fn query(&self, family: &str) -> Option<fontdb::ID> {
+        self.db.query(&Query { families: &[Family::Name(family)], weight: Weight::NORMAL, ..Default::default() })
     }
 
-    fn query(&self, family: &str, bold: bool) -> Option<fontdb::ID> {
-        self.db.query(&Query {
-            families: &[Family::Name(family)],
-            weight: if bold { Weight::BOLD } else { Weight::NORMAL },
-            ..Default::default()
-        })
-    }
-
-    /// Schriftdaten samt Index innerhalb einer Font-Collection.
-    pub fn font_data(&self, family: &str, bold: bool) -> Option<(Vec<u8>, u32)> {
-        let id = self.query(family, bold)?;
+    /// Schriftdaten (normaler Schnitt) samt Index innerhalb einer Font-Collection.
+    pub fn font_data(&self, family: &str) -> Option<(Vec<u8>, u32)> {
+        let id = self.query(family)?;
         self.db.with_face_data(id, |data, index| (data.to_vec(), index))
     }
 
-    /// Textbreite in mm aus den Schriftmetriken (ohne Kerning). Ersatzweise grob geschätzt.
-    pub fn text_width_mm(&self, family: &str, bold: bool, text: &str, size_pt: f32) -> f32 {
-        let em = self
-            .query(family, bold)
-            .and_then(|id| {
-                self.db.with_face_data(id, |data, index| {
-                    let face = ttf_parser::Face::parse(data, index).ok()?;
-                    let upm = face.units_per_em() as f32;
-                    Some(
-                        text.chars()
-                            .map(|c| {
-                                face.glyph_index(c)
-                                    .and_then(|g| face.glyph_hor_advance(g))
-                                    .map_or(0.5, |a| a as f32 / upm)
-                            })
-                            .sum::<f32>(),
-                    )
-                })?
-            })
-            .unwrap_or(text.chars().count() as f32 * 0.5);
-        em * size_pt / PT_PER_MM
+    /// (Höhe der Oberlängen, Tiefe der Unterlängen) in Schriftgrößen-Einheiten (em), gemessen an
+    /// den Glyphen: Oberlängen von b d f h k l (und H, Ziffern), Unterlängen von g j p q y.
+    /// Daraus ergibt sich der Zeilenabstand zwischen Unter- und Oberlängen.
+    pub fn line_metrics(&self, family: &str) -> Option<(f32, f32)> {
+        let id = self.query(family)?;
+        self.db.with_face_data(id, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let upm = face.units_per_em() as f32;
+            let extent = |chars: &str, f: &dyn Fn(ttf_parser::Rect) -> f32| {
+                chars
+                    .chars()
+                    .filter_map(|c| face.glyph_index(c).and_then(|g| face.glyph_bounding_box(g)))
+                    .map(f)
+                    .fold(0.0f32, f32::max)
+            };
+            let up = extent("bdfhklH0123456789", &|r| r.y_max as f32) / upm;
+            let down = extent("gjpqy", &|r| -(r.y_min as f32)) / upm;
+            (up > 0.0 && down > 0.0).then_some((up, down))
+        })?
     }
 }
 
-/// egui-Schriftfamilie für Block `idx` (0 = Empfänger, 1 = Absender), normal oder fett.
-pub fn family(idx: usize, bold: bool) -> egui::FontFamily {
-    const NAMES: [&str; 4] = ["recipient", "recipient_bold", "sender", "sender_bold"];
-    egui::FontFamily::Name(NAMES[idx * 2 + bold as usize].into())
+/// Ersatzwerte (Arial) für Oberlängen und Unterlängen, falls die Schrift nicht gemessen werden kann.
+pub const FALLBACK_METRICS: (f32, f32) = (0.716, 0.210);
+
+/// egui-Schriftfamilie für Block `idx` (0 = Empfänger, 1 = Absender).
+pub fn family(idx: usize) -> egui::FontFamily {
+    const NAMES: [&str; 2] = ["recipient", "sender"];
+    egui::FontFamily::Name(NAMES[idx].into())
 }
 
 /// Schriften der Oberfläche (Arial) und leere Adress-Familien. Die GUI-Schrift bleibt immer gleich.
@@ -89,9 +109,7 @@ pub fn base_fonts() -> egui::FontDefinitions {
     }
     let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
     for idx in 0..2 {
-        for bold in [false, true] {
-            fonts.families.insert(family(idx, bold), fallback.clone());
-        }
+        fonts.families.insert(family(idx), fallback.clone());
     }
     fonts
 }
@@ -101,16 +119,14 @@ pub fn apply_preview_fonts(ctx: &egui::Context, sf: Option<&SystemFonts>, names:
     let mut fonts = base_fonts();
     if let Some(sf) = sf {
         for (idx, name) in names.iter().enumerate() {
-            for bold in [false, true] {
-                let Some((bytes, index)) = sf.font_data(name, bold) else { continue };
-                let key = format!("{name}|{bold}");
-                if !fonts.font_data.contains_key(&key) {
-                    let mut fd = egui::FontData::from_owned(bytes);
-                    fd.index = index;
-                    fonts.font_data.insert(key.clone(), fd.into());
-                }
-                fonts.families.get_mut(&family(idx, bold)).unwrap().insert(0, key);
+            let Some((bytes, index)) = sf.font_data(name) else { continue };
+            let key = name.to_string();
+            if !fonts.font_data.contains_key(&key) {
+                let mut fd = egui::FontData::from_owned(bytes);
+                fd.index = index;
+                fonts.font_data.insert(key.clone(), fd.into());
             }
+            fonts.families.get_mut(&family(idx)).unwrap().insert(0, key);
         }
     }
     ctx.set_fonts(fonts);
@@ -121,13 +137,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_system_fonts() {
+    fn allowed_families() {
+        for ok in ["Arial", "Arial Nova", "Helvetica", "Helvetica Neue", "Frutiger LT Std", "Univers LT Std", "Liberation Sans", "Verdana"] {
+            assert!(is_allowed_family(ok), "{ok}");
+        }
+        for no in ["Times New Roman", "Arial Black", "Arial Narrow", "Arial Rounded MT Bold", "Consolas", "Comic Sans MS", "Segoe Script", "Helvetica Neue Condensed"] {
+            assert!(!is_allowed_family(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn measures_ascender_and_descender() {
         let sf = SystemFonts::load();
-        // Auf minimalen CI-Systemen gibt es evtl. keine Helvetica-ähnliche Schrift.
-        let Some(fam) = sf.helvetica_like().map(str::to_owned) else { return };
-        assert!(sf.font_data(&fam, false).unwrap().0.len() > 10_000);
-        let (reg, bold) = (sf.text_width_mm(&fam, false, "Hamburgefonts", 12.0), sf.text_width_mm(&fam, true, "Hamburgefonts", 12.0));
-        println!("regular {reg:.2} mm, bold {bold:.2} mm");
-        assert!(bold > reg && reg > 10.0 && reg < 40.0);
+        let Some(fam) = sf.allowed.first().cloned() else { return };
+        assert!(sf.font_data(&fam).unwrap().0.len() > 10_000);
+        let (up, down) = sf.line_metrics(&fam).unwrap();
+        println!("{fam}: Oberlänge {up:.3} em, Unterlänge {down:.3} em");
+        assert!((0.55..0.95).contains(&up) && (0.1..0.4).contains(&down));
     }
 }

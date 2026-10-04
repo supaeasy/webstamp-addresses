@@ -10,7 +10,7 @@ mod stamp;
 use config::{BlockCfg, Config, Destination};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use graphic::Graphic;
-use stamp::{Align, Block, PT_PER_MM, Placed, Raster, Template};
+use stamp::{Block, PT_PER_MM, Placed, Raster, Template};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,6 +30,7 @@ fn border() -> Color32 { pick((226, 232, 240), (51, 65, 85)) }
 fn sidebar_bg() -> Color32 { pick((241, 245, 249), (15, 23, 42)) }
 fn card_bg() -> Color32 { pick((255, 255, 255), (30, 41, 59)) }
 fn desk_bg() -> Color32 { pick((203, 213, 225), (51, 65, 85)) }
+fn warn() -> Color32 { pick((180, 83, 9), (251, 191, 36)) }
 
 const PLACEHOLDER_RECIPIENT: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
 const PLACEHOLDER_SENDER: &str = "Absender\nStraße 1\n12345 Ort";
@@ -204,15 +205,23 @@ impl App {
         }
     }
 
+    /// Adressblock mit Zeilenabstand aus den Schriftmetriken: Abstand zwischen den Unterlängen der
+    /// oberen und den Oberlängen der unteren Zeile = `line_gap_mm` (Vorgabe der Post: 1 bis 1,5 mm).
     fn block(&self, idx: usize, text: &str) -> Block {
         let c = if idx == 0 { &self.cfg.recipient } else { &self.cfg.sender_block };
+        let (up, down) = self
+            .system_fonts
+            .as_ref()
+            .and_then(|sf| sf.line_metrics(&c.font))
+            .unwrap_or(fonts::FALLBACK_METRICS);
+        let em_mm = c.size_pt / PT_PER_MM;
         Block {
             text: text.to_string(),
             pos: c.pos,
-            width_mm: c.width_mm,
             size_pt: c.size_pt,
-            align: c.align,
             font: c.font.clone(),
+            ascent_mm: up * em_mm,
+            pitch_mm: (up + down) * em_mm + c.line_gap_mm,
         }
     }
 
@@ -304,24 +313,9 @@ impl App {
     fn write_pdf(&self, out: &Path) -> Result<Vec<String>, String> {
         let l = self.loaded.as_ref().ok_or("Keine Vorlage geladen")?;
         let sf = self.system_fonts.as_ref();
-        // Breiten mit der gewählten Schrift messen; ohne Schriftdaten mit einer Helvetica-ähnlichen.
-        let fallback = sf.and_then(|s| s.helvetica_like()).unwrap_or("Arial").to_string();
-        let mut family_for: std::collections::HashMap<(String, bool), String> = Default::default();
-        let mut measure = |b: &Block, text: &str, bold: bool| match sf {
-            Some(sf) => {
-                let family = family_for
-                    .entry((b.font.clone(), bold))
-                    .or_insert_with(|| {
-                        if sf.font_data(&b.font, bold).is_some() { b.font.clone() } else { fallback.clone() }
-                    })
-                    .clone();
-                sf.text_width_mm(&family, bold, text, b.size_pt)
-            }
-            None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
-        };
-        let face = |family: &str, bold: bool| sf.and_then(|s| s.font_data(family, bold));
+        let face = |family: &str| sf.and_then(|s| s.font_data(family));
         let images = placed(&self.image, &self.cfg.image);
-        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &mut measure, &face)
+        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &face)
     }
 
     /// Eingaben und Einstellungen eines Adressblocks (0 = Empfänger, 1 = Absender).
@@ -341,7 +335,34 @@ impl App {
         } else {
             ("sender_text", 3, "Absender-Adresse")
         };
-        address_editor(ui, egui::Id::new(id), text, rows, hint, enabled, &mut cfg.align);
+        ui.add_enabled(
+            enabled,
+            egui::TextEdit::multiline(text)
+                .id(egui::Id::new(id))
+                .desired_rows(rows)
+                .desired_width(f32::INFINITY)
+                .hint_text(hint),
+        );
+
+        // Hinweise zu den Formvorgaben der Post (drei bis sechs Zeilen, keine Leerzeilen).
+        if enabled {
+            let all = text.lines().count();
+            let used = text.lines().filter(|l| !l.trim().is_empty()).count();
+            let mut notes: Vec<String> = vec![];
+            if used > 0 && !(config::MIN_LINES..=config::MAX_LINES).contains(&used) {
+                notes.push(format!(
+                    "Die Post verlangt {} bis {} Zeilen (aktuell {used}).",
+                    config::MIN_LINES,
+                    config::MAX_LINES
+                ));
+            }
+            if text.trim_end().lines().skip_while(|l| l.trim().is_empty()).any(|l| l.trim().is_empty()) || all > used + 1 {
+                notes.push("Leerzeilen sind nicht erlaubt und werden nicht gedruckt.".into());
+            }
+            for n in notes {
+                ui.label(egui::RichText::new(format!("⚠ {n}")).small().color(warn()));
+            }
+        }
 
         ui.horizontal(|ui| {
             ui.label("Schrift");
@@ -356,10 +377,28 @@ impl App {
         });
         ui.horizontal(|ui| {
             ui.label("Größe");
-            ui.add(egui::DragValue::new(&mut cfg.size_pt).speed(0.1).range(5.0..=40.0).suffix(" pt"));
-            ui.label("Breite");
-            ui.add(egui::DragValue::new(&mut cfg.width_mm).speed(0.5).range(20.0..=200.0).suffix(" mm"));
+            egui::ComboBox::from_id_salt(("size", id))
+                .width(86.0)
+                .selected_text(size_label(cfg.size_pt))
+                .show_ui(ui, |ui| {
+                    for pt in (config::MIN_SIZE_PT as u32)..=(config::MAX_SIZE_PT as u32) {
+                        ui.selectable_value(&mut cfg.size_pt, pt as f32, size_label(pt as f32));
+                    }
+                });
+            ui.label("Zeilenabstand");
+            ui.add(
+                egui::DragValue::new(&mut cfg.line_gap_mm)
+                    .speed(0.01)
+                    .range(config::MIN_GAP_MM..=config::MAX_GAP_MM)
+                    .fixed_decimals(2)
+                    .suffix(" mm"),
+            );
         });
+        ui.label(
+            egui::RichText::new("Post-Vorgaben: Grotesk-Schrift, 9–28 pt (ideal 10), linksbündig, nicht fett, Abstand Unter-/Oberlängen 1–1,5 mm.")
+                .small()
+                .color(muted()),
+        );
 
         if idx == 1 {
             ui.horizontal(|ui| {
@@ -622,29 +661,24 @@ impl App {
         for (idx, b, ghost) in blocks {
             let color = if ghost { Color32::from_gray(160) } else { Color32::BLACK };
 
-            // Textbreiten aus den Vorschau-Schriften (bei 10-facher Größe gemessen, genauer).
-            let runs = stamp::layout(&b, &mut |text, bold| {
-                let g = painter.layout_no_wrap(
-                    text.to_string(),
-                    FontId::new(b.size_pt * 10.0, fonts::family(idx, bold)),
-                    Color32::BLACK,
-                );
-                g.size().x / 10.0 / PT_PER_MM
-            });
-            for r in &runs {
+            let mut width_px = 0.0f32;
+            for r in &stamp::layout(&b) {
                 let g = painter.layout_no_wrap(
                     r.text.clone(),
-                    FontId::new(b.size_pt * px_per_pt, fonts::family(idx, r.bold)),
+                    FontId::new(b.size_pt * px_per_pt, fonts::family(idx)),
                     color,
                 );
                 let baseline = g.rows.first().and_then(|row| row.glyphs.first()).map_or(0.905 * b.size_pt * px_per_pt, |gl| gl.pos.y);
+                width_px = width_px.max(g.size().x);
                 let at = env.min + Vec2::new(r.x_mm * s, r.baseline_mm * s - baseline);
                 painter.galley(at, g, color);
             }
 
-            let lines = b.text.lines().count().max(1) as f32;
+            // Anfasser: von der Oberkante der Oberlängen bis zur Unterkante der letzten Unterlänge.
+            let n = b.lines().len().max(1) as f32;
+            let height_mm = b.ascent_mm + (n - 1.0) * b.pitch_mm + (b.pitch_mm - b.ascent_mm).max(2.0);
             let top = env.min + Vec2::new(b.pos[0], b.pos[1]) * s;
-            let hit = Rect::from_min_size(top, Vec2::new(b.width_mm * s, lines * b.line_height_mm() * s)).expand(4.0);
+            let hit = Rect::from_min_size(top, Vec2::new(width_px.max(24.0), height_mm * s)).expand(4.0);
             let resp = ui.interact(hit, egui::Id::new(("block", idx)), Sense::click_and_drag());
             if resp.hovered() || resp.dragged() {
                 painter.rect_stroke(hit, 2.0, Stroke::new(1.0, Color32::from_rgb(40, 120, 220)), egui::StrokeKind::Middle);
@@ -673,53 +707,9 @@ fn font_note(missing: &[String]) -> String {
     }
 }
 
-/// Mehrzeiliges Adressfeld mit Werkzeugleiste: Fett (Strg+B) und Ausrichtung.
-fn address_editor(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    text: &mut String,
-    rows: usize,
-    hint: &str,
-    enabled: bool,
-    align: &mut Align,
-) {
-    let ctx = ui.ctx().clone();
-    ui.horizontal(|ui| {
-        let bold_btn = ui
-            .add_enabled(enabled, egui::Button::new(egui::RichText::new("B").strong()).min_size(Vec2::new(28.0, 0.0)))
-            .on_hover_text("Markierten Text fett drucken (Strg+B)");
-        if bold_btn.clicked() {
-            bold_selection(&ctx, id, text);
-        }
-        ui.separator();
-        ui.selectable_value(align, Align::Left, "Links");
-        ui.selectable_value(align, Align::Justify, "Blocksatz");
-        ui.selectable_value(align, Align::Right, "Rechts");
-    });
-    if enabled && ctx.memory(|m| m.has_focus(id)) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)) {
-        bold_selection(&ctx, id, text);
-    }
-    ui.add_enabled(
-        enabled,
-        egui::TextEdit::multiline(text)
-            .id(id)
-            .desired_rows(rows)
-            .desired_width(f32::INFINITY)
-            .hint_text(hint),
-    );
-}
-
-/// Setzt/entfernt `**` um die aktuell markierte Auswahl des Textfeldes.
-fn bold_selection(ctx: &egui::Context, id: egui::Id, text: &mut String) {
-    let Some(mut state) = egui::TextEdit::load_state(ctx, id) else { return };
-    let Some(range) = state.cursor.char_range() else { return };
-    let (a, b) = stamp::toggle_bold(text, (range.primary.index.into(), range.secondary.index.into()));
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-        egui::text::CCursor::new(a),
-        egui::text::CCursor::new(b),
-    )));
-    state.store(ctx, id);
-    ctx.memory_mut(|m| m.request_focus(id));
+/// Anzeige einer Schriftgröße; 10 pt ist die von der Post empfohlene.
+fn size_label(pt: f32) -> String {
+    if (pt - config::IDEAL_SIZE_PT).abs() < 0.01 { format!("{pt:.0} pt (ideal)") } else { format!("{pt:.0} pt") }
 }
 
 /// Eingabefeld mit Autovervollständigung über alle installierten Schriftarten.
@@ -743,7 +733,7 @@ fn font_picker(
         egui::TextEdit::singleline(&mut st.query)
             .id_salt(("font_edit", id))
             .desired_width(190.0)
-            .hint_text("Schriftart suchen…"),
+            .hint_text("Grotesk-Schrift suchen…"),
     );
     if resp.gained_focus() {
         st.open = true;
@@ -758,19 +748,19 @@ fn font_picker(
     let q = st.query.trim().to_lowercase();
     let matches: Vec<&String> = if st.typed && !q.is_empty() {
         let (mut pre, mut rest): (Vec<&String>, Vec<&String>) = sf
-            .families
+            .allowed
             .iter()
             .filter(|f| f.to_lowercase().contains(&q))
             .partition(|f| f.to_lowercase().starts_with(&q));
         pre.append(&mut rest);
         pre
     } else {
-        sf.families.iter().collect()
+        sf.allowed.iter().collect()
     };
 
     if resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
         chosen = sf
-            .canonical(&st.query)
+            .canonical_allowed(&st.query)
             .map(str::to_owned)
             .or_else(|| matches.first().map(|s| (*s).clone()));
         if chosen.is_none() {
@@ -787,7 +777,7 @@ fn font_picker(
                     ui.set_min_width(resp.rect.width());
                     egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                         if matches.is_empty() {
-                            ui.label(egui::RichText::new("Keine passende Schrift").color(muted()));
+                            ui.label(egui::RichText::new("Keine passende erlaubte Schrift installiert").color(muted()));
                         }
                         for name in &matches {
                             if ui.selectable_label(name.as_str() == current, name.as_str()).clicked() {
@@ -884,7 +874,12 @@ impl eframe::App for App {
         if let Some(rx) = &self.fonts_rx {
             if let Ok(sf) = rx.try_recv() {
                 for (cfg, picker) in [&mut self.cfg.recipient, &mut self.cfg.sender_block].into_iter().zip(&mut self.pickers) {
-                    if let Some(name) = sf.canonical(&cfg.font).map(str::to_owned) {
+                    // Nur erlaubte Grotesk-Schriften; sonst die erste installierte erlaubte (meist Arial).
+                    if let Some(name) = sf
+                        .canonical_allowed(&cfg.font)
+                        .map(str::to_owned)
+                        .or_else(|| sf.allowed.first().cloned())
+                    {
                         cfg.font = name;
                     }
                     picker.query = cfg.font.clone();

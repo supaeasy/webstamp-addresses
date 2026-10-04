@@ -1,27 +1,44 @@
-use crate::stamp::Align;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Vorgaben der Schweizerischen Post für Adressen („Korrekte Adressierung“, Seite 31):
+/// Schriftgröße mindestens 3 mm (ca. 9 pt), höchstens 9,8 mm (ca. 28 pt), ideal 10 pt;
+/// Zeilenabstand zwischen den Unterlängen der oberen und den Oberlängen der unteren Zeile
+/// mindestens 1 mm, höchstens 1,5 mm; drei bis sechs Zeilen.
+pub const MIN_SIZE_PT: f32 = 9.0;
+pub const MAX_SIZE_PT: f32 = 28.0;
+pub const IDEAL_SIZE_PT: f32 = 10.0;
+pub const MIN_GAP_MM: f32 = 1.0;
+pub const MAX_GAP_MM: f32 = 1.5;
+pub const MIN_LINES: usize = 3;
+pub const MAX_LINES: usize = 6;
 
 /// Einstellungen eines Adressblocks (Position links oben in mm).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct BlockCfg {
+    /// Oberkante der Oberlängen der ersten Zeile.
     pub pos: [f32; 2],
-    /// Breite des Textfeldes in mm (Bezug für rechtsbündig und Blocksatz).
-    pub width_mm: f32,
     pub size_pt: f32,
-    /// Schriftart (muss unter Windows installiert sein).
+    /// Abstand zwischen Unterlängen der oberen und Oberlängen der unteren Zeile in mm.
+    pub line_gap_mm: f32,
+    /// Schriftart (muss installiert und eine erlaubte Grotesk-Schrift sein).
     pub font: String,
-    pub align: Align,
 }
 
 impl BlockCfg {
     pub fn recipient() -> Self {
-        Self { pos: [105.0, 85.0], width_mm: 90.0, size_pt: 12.0, font: "Arial".into(), align: Align::Left }
+        Self { pos: [105.0, 85.0], size_pt: IDEAL_SIZE_PT, line_gap_mm: 1.25, font: "Arial".into() }
     }
 
     pub fn sender() -> Self {
-        Self { pos: [12.0, 12.0], width_mm: 70.0, size_pt: 9.0, font: "Arial".into(), align: Align::Left }
+        Self { pos: [12.0, 12.0], size_pt: MIN_SIZE_PT, line_gap_mm: 1.25, font: "Arial".into() }
+    }
+
+    /// Bringt Werte aus einer älteren oder von Hand bearbeiteten Konfiguration in den erlaubten Bereich.
+    pub fn clamp(&mut self) {
+        self.size_pt = self.size_pt.clamp(MIN_SIZE_PT, MAX_SIZE_PT).round();
+        self.line_gap_mm = self.line_gap_mm.clamp(MIN_GAP_MM, MAX_GAP_MM);
     }
 }
 
@@ -59,7 +76,7 @@ impl Default for ImageCfg {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// Standard-Absender (mehrzeilig, `**fett**` möglich).
+    /// Standard-Absender (mehrzeilig).
     pub sender: String,
     pub print_sender: bool,
     pub recipient: BlockCfg,
@@ -110,12 +127,15 @@ fn legacy_path() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Self {
-        path()
+        let mut c: Config = path()
             .filter(|p| p.exists())
             .or_else(legacy_path)
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        c.recipient.clamp();
+        c.sender_block.clamp();
+        c
     }
 
     pub fn save(&self) -> std::io::Result<()> {

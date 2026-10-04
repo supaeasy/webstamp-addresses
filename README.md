@@ -12,7 +12,7 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 ### Funktionen
 
 - **Webstamp-PDF als Vorlage:** per Drag & Drop, über „Stempel-PDF öffnen…“ oder als Startargument. Die zuletzt benutzte Vorlage wird beim nächsten Start wieder geladen.
-- **Empfänger- und Absenderadresse** (mehrzeilig), Schriftgröße je Block einstellbar.
+- **Empfänger- und Absenderadresse** (mehrzeilig).
 - **Standard-Absender:** einmal speichern („Als Standard speichern“), danach immer vorbelegt. Der Absender lässt sich pro Umschlag abschalten.
 - **Frei verschiebbare Adressblöcke:** per Maus in der Vorschau ziehen oder die Position in mm eingeben. Die Positionen werden gespeichert.
 - **Bild oder Vektorgrafik einfügen** (z. B. Logo; PNG, JPG, BMP, GIF und **SVG**, auch mit Transparenz; SVGs werden in der jeweiligen Druckauflösung gerendert und bleiben scharf): frei verschiebbar wie die Adressblöcke, Größe über den Eckgriff oder die Breite in mm (Seitenverhältnis bleibt). Wird mitgedruckt und ins PDF übernommen.
@@ -20,8 +20,11 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 - **Hilfslinien:** eine horizontale und eine vertikale Linie, frei verschiebbar (nur Vorschau, werden nicht gedruckt).
 - **Direktdruck** über den Windows-Druckdialog (Drucker und Papierformat C5 wählbar). Der Umschlag wird bei Hochformat-Einzug automatisch gedreht; zusätzlich „180° drehen“ und ein Feinversatz in mm für die Druckerjustage.
 - **Als PDF speichern** zur Kontrolle vor dem Druck. Die gewählten Schriften werden als Teilschrift eingebettet (Text bleibt durchsuchbar); fehlt eine Schrift, wird Helvetica verwendet und in der Statusleiste gemeldet.
-- **Schrift, Ausrichtung und Breite pro Adressfeld:** Empfänger und Absender haben je eigene Schriftart (Auswahlfeld mit Autovervollständigung über alle installierten Schriften), Größe, Textbreite sowie Ausrichtung *Links*, *Blocksatz* oder *Rechts*.
-- **Fettdruck:** Text markieren und Strg+B (oder Button **B**) drücken – fette Teile werden im Text als `**fett**` markiert und gedruckt.
+- **Adressvorgaben der Schweizer Post fest eingebaut** (Merkblatt „Korrekte Adressierung“): Empfänger und Absender haben je eigene Schrift, Größe und Zeilenabstand, aber nur im erlaubten Rahmen.
+  - **Schrift:** nur Grotesk-Schriften (Arial, Helvetica, Frutiger, Univers, Verdana und metrikgleiche wie Liberation Sans/Arimo), per Autovervollständigung aus den installierten; keine Fettschrift, Kursiv-, Zier- oder gebrochene Schriften; schwarz.
+  - **Größe:** 9 bis 28 pt (mindestens 3 mm, höchstens 9,8 mm), ideal 10 pt.
+  - **Zeilenabstand:** Abstand zwischen den Unterlängen der oberen und den Oberlängen der unteren Zeile 1 bis 1,5 mm (Standard 1,25 mm), aus den Schriftmetriken berechnet.
+  - **Form:** immer linksbündig, keine Leerzeilen (werden nicht gedruckt), Hinweis bei weniger als 3 oder mehr als 6 Zeilen.
 - **Hell-/Dunkelmodus:** folgt automatisch dem Windows-Design.
 - Einstellungen werden automatisch gesichert unter `%APPDATA%\webstamp-addresses\config.json`.
 
@@ -75,7 +78,7 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 ### Features
 
 - **Webstamp PDF as template:** drag & drop, “Stempel-PDF öffnen…” (open), or pass it as a command-line argument. The last used template is reloaded on startup.
-- **Recipient and sender address** (multi-line) with a font size per block.
+- **Recipient and sender address** (multi-line).
 - **Default sender:** save it once (“Als Standard speichern”) and it is pre-filled from then on. The sender can be switched off per envelope.
 - **Freely movable address blocks:** drag them in the preview or enter the position in mm. Positions are persisted.
 - **Insert an image or vector graphic** (e.g. a logo; PNG, JPG, BMP, GIF and **SVG**, transparency supported; SVGs are rendered at the actual print resolution and stay sharp): freely movable like the address blocks, resizable via the corner handle or the width in mm (aspect ratio is kept). It is printed and included in the PDF export.
@@ -83,8 +86,11 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 - **Guide lines:** one horizontal and one vertical line, freely movable (preview only, never printed).
 - **Direct printing** through the Windows print dialog (choose printer and paper size C5). The envelope is rotated automatically for portrait paper feeds; there is also a “rotate 180°” option and a fine offset in mm for printer calibration.
 - **Save as PDF** to check the result before printing. The selected fonts are embedded as subsets (text stays searchable); if a font is missing, Helvetica is used and reported in the status bar.
-- **Font, alignment and width per address field:** recipient and sender each have their own font (search-as-you-type picker over all installed fonts), size, text width and alignment *left*, *justified* or *right*.
-- **Bold text:** select text and press Ctrl+B (or the **B** button) – bold parts are marked as `**bold**` in the text and printed bold.
+- **Swiss Post address rules built in** (leaflet “Korrekte Adressierung”): recipient and sender each have their own font, size and line spacing, but only within the permitted range.
+  - **Font:** grotesque sans-serif fonts only (Arial, Helvetica, Frutiger, Univers, Verdana and metric-compatible ones such as Liberation Sans/Arimo), chosen by search-as-you-type from the installed fonts; no bold, italic, decorative or blackletter fonts; black.
+  - **Size:** 9 to 28 pt (at least 3 mm, at most 9.8 mm), ideal 10 pt.
+  - **Line spacing:** distance between the descenders of the upper and the ascenders of the lower line 1 to 1.5 mm (default 1.25 mm), computed from the font metrics.
+  - **Layout:** always left-aligned, no blank lines (they are not printed), a hint appears for fewer than 3 or more than 6 lines.
 - **Light/dark mode:** follows the Windows theme automatically.
 - Settings are saved automatically to `%APPDATA%\webstamp-addresses\config.json`.
 

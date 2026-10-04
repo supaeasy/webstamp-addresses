@@ -3,32 +3,22 @@ use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use lopdf::{Document, Object, Stream, dictionary};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 pub const PT_PER_MM: f32 = 72.0 / 25.4;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
-pub enum Align {
-    #[default]
-    Left,
-    Right,
-    /// Blocksatz: alle Zeilen außer der letzten werden auf die Feldbreite gestreckt.
-    Justify,
-}
-
-/// Ein Adressblock; Position (links oben) und Breite in mm, Schriftgröße in pt.
-/// Im Text markiert `**…**` fett gedruckte Teile (innerhalb einer Zeile).
+/// Ein Adressblock: linksbündig, eine einheitliche Schrift in Schwarz.
+/// `pos` ist die Oberkante der Oberlängen der ersten Zeile (mm), `ascent_mm` der Abstand von dort
+/// zur Grundlinie, `pitch_mm` der Zeilenabstand von Grundlinie zu Grundlinie.
 #[derive(Clone, Debug)]
 pub struct Block {
     pub text: String,
     pub pos: [f32; 2],
-    pub width_mm: f32,
     pub size_pt: f32,
-    pub align: Align,
-    #[cfg_attr(not(windows), allow(dead_code))] // nur der Windows-Druck wählt die Schrift selbst
     pub font: String,
+    pub ascent_mm: f32,
+    pub pitch_mm: f32,
 }
 
 /// Ein zu zeichnender Textabschnitt (absolute Position in mm, Grundlinie).
@@ -37,7 +27,6 @@ pub struct Run {
     pub x_mm: f32,
     pub baseline_mm: f32,
     pub text: String,
-    pub bold: bool,
 }
 
 /// Ein platziertes Bild (links oben `pos`, Breite in mm; die Höhe ergibt sich aus dem Seitenverhältnis).
@@ -54,132 +43,25 @@ impl Placed<'_> {
 }
 
 impl Block {
-    pub fn line_height_mm(&self) -> f32 {
-        self.size_pt * 1.2 / PT_PER_MM
+    /// Die Adresszeilen: ohne Leerzeilen (verboten) und ohne führende/nachfolgende Leerzeichen
+    /// (Anschlag linksbündig).
+    pub fn lines(&self) -> Vec<&str> {
+        self.text.lines().map(str::trim).filter(|l| !l.is_empty()).collect()
     }
 
     /// Grundlinie der Zeile `i` in mm.
     pub fn baseline_mm(&self, i: usize) -> f32 {
-        self.pos[1] + (i as f32 * self.size_pt * 1.2 + self.size_pt * 0.905) / PT_PER_MM
+        self.pos[1] + self.ascent_mm + i as f32 * self.pitch_mm
     }
 }
 
-/// Teilt eine Zeile an `**` in (Text, fett)-Abschnitte.
-pub fn spans(line: &str) -> Vec<(String, bool)> {
-    let mut out = vec![];
-    let mut bold = false;
-    for part in line.split("**") {
-        if !part.is_empty() {
-            out.push((part.to_string(), bold));
-        }
-        bold = !bold;
-    }
-    out
-}
-
-/// Berechnet die Positionen aller Textabschnitte. `measure(text, fett)` liefert die Breite in mm.
-pub fn layout(b: &Block, measure: &mut dyn FnMut(&str, bool) -> f32) -> Vec<Run> {
-    let lines: Vec<&str> = b.text.lines().collect();
-    let is_blank = |l: &str| spans(l).iter().all(|(t, _)| t.trim().is_empty());
-    let last = lines.iter().rposition(|l| !is_blank(l));
-    let right = b.pos[0] + b.width_mm;
-    let mut runs = vec![];
-
-    for (i, line) in lines.iter().enumerate() {
-        if is_blank(line) {
-            continue;
-        }
-        let y = b.baseline_mm(i);
-        let mut sp = spans(line);
-
-        if b.align == Align::Justify && Some(i) != last {
-            let words: Vec<(String, bool)> = sp
-                .iter()
-                .flat_map(|(t, bold)| t.split_whitespace().map(move |w| (w.to_string(), *bold)))
-                .collect();
-            if words.len() >= 2 {
-                let widths: Vec<f32> = words.iter().map(|(w, bold)| measure(w, *bold)).collect();
-                let sum: f32 = widths.iter().sum();
-                let space = measure(" ", false);
-                let gap = ((b.width_mm - sum) / (words.len() - 1) as f32).max(space);
-                let mut x = b.pos[0];
-                for ((text, bold), w) in words.into_iter().zip(widths) {
-                    runs.push(Run { x_mm: x, baseline_mm: y, text, bold });
-                    x += w + gap;
-                }
-                continue;
-            }
-        }
-
-        if b.align == Align::Right {
-            if let Some(l) = sp.last_mut() {
-                l.0 = l.0.trim_end().to_string();
-            }
-            sp.retain(|(t, _)| !t.is_empty());
-        }
-        let widths: Vec<f32> = sp.iter().map(|(t, bold)| measure(t, *bold)).collect();
-        let mut x = if b.align == Align::Right { right - widths.iter().sum::<f32>() } else { b.pos[0] };
-        for ((text, bold), w) in sp.into_iter().zip(widths) {
-            runs.push(Run { x_mm: x, baseline_mm: y, text, bold });
-            x += w;
-        }
-    }
-    runs
-}
-
-fn char_to_byte(s: &str, ci: usize) -> usize {
-    s.char_indices().nth(ci).map(|(i, _)| i).unwrap_or(s.len())
-}
-
-/// Schaltet Fettdruck (`**`) für die Auswahl (Zeichenindizes) um und liefert die neue Auswahl.
-pub fn toggle_bold(text: &mut String, sel: (usize, usize)) -> (usize, usize) {
-    let (a, b) = (sel.0.min(sel.1), sel.0.max(sel.1));
-    if a == b {
-        return sel;
-    }
-    let (ba, bb) = (char_to_byte(text, a), char_to_byte(text, b));
-
-    // Auswahl liegt direkt innerhalb von **…** → Sterne entfernen.
-    if text[..ba].ends_with("**") && text[bb..].starts_with("**") {
-        text.replace_range(bb..bb + 2, "");
-        text.replace_range(ba - 2..ba, "");
-        return (a - 2, b - 2);
-    }
-
-    let selected = text[ba..bb].to_string();
-    let pieces: Vec<&str> = selected.split('\n').collect();
-    let wrapped = |p: &str| {
-        let t = p.trim();
-        t.len() >= 4 && t.starts_with("**") && t.ends_with("**")
-    };
-    let content: Vec<&&str> = pieces.iter().filter(|p| !p.trim().is_empty()).collect();
-    if content.is_empty() {
-        return sel;
-    }
-    let unwrap = content.iter().all(|p| wrapped(p));
-
-    let mut out = String::new();
-    for (k, p) in pieces.iter().enumerate() {
-        if k > 0 {
-            out.push('\n');
-        }
-        if p.trim().is_empty() {
-            out.push_str(p);
-            continue;
-        }
-        let core = p.trim();
-        out.push_str(&p[..p.len() - p.trim_start().len()]);
-        if unwrap {
-            out.push_str(&core[2..core.len() - 2]);
-        } else if wrapped(p) {
-            out.push_str(core);
-        } else {
-            out.push_str(&format!("**{core}**"));
-        }
-        out.push_str(&p[p.trim_end().len()..]);
-    }
-    text.replace_range(ba..bb, &out);
-    (a, a + out.chars().count())
+/// Positionen aller Zeilen. Alle beginnen am linken Rand des Blocks.
+pub fn layout(b: &Block) -> Vec<Run> {
+    b.lines()
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| Run { x_mm: b.pos[0], baseline_mm: b.baseline_mm(i), text: l.to_string() })
+        .collect()
 }
 
 pub struct Template {
@@ -231,63 +113,52 @@ pub fn render_template(t: &Template, dpi: f32) -> Result<Raster, String> {
     })
 }
 
-/// Liefert die Schriftdaten (Bytes, Index in der Collection) zu Familie und Fett.
-pub type FaceFn<'a> = &'a dyn Fn(&str, bool) -> Option<(Vec<u8>, u32)>;
+/// Liefert die Schriftdaten (Bytes, Index in der Collection) zu einer Familie.
+pub type FaceFn<'a> = &'a dyn Fn(&str) -> Option<(Vec<u8>, u32)>;
 
 /// Schreibt Vorlage + Adressen + Bilder als PDF. Die gewählten Schriften werden als Teilschrift
 /// (nur die benutzten Zeichen) eingebettet; fehlt eine Schrift, wird Helvetica verwendet.
-/// `measure(block, text, fett)` liefert die Textbreite in mm. Rückgabe: Familien ohne Schriftdaten.
+/// Rückgabe: Familien ohne Schriftdaten.
 pub fn export_pdf(
     t: &Template,
     blocks: &[Block],
     images: &[Placed],
     out: &Path,
-    measure: &mut dyn FnMut(&Block, &str, bool) -> f32,
     face: FaceFn,
 ) -> Result<Vec<String>, String> {
     let mut doc = Document::load_mem(&t.bytes).map_err(|e| e.to_string())?;
     let page_id = *doc.get_pages().values().next().ok_or("keine Seite")?;
     let page_h_pt = t.height_mm * PT_PER_MM;
 
-    // 1. Layout aller Blöcke und benutzte Zeichen je (Schrift, fett)
-    let layouts: Vec<Vec<Run>> = blocks
-        .iter()
-        .map(|b| layout(b, &mut |text, bold| measure(b, text, bold)))
-        .collect();
-    let mut used: BTreeMap<(String, bool), BTreeSet<char>> = BTreeMap::new();
+    // 1. Layout aller Blöcke und benutzte Zeichen je Schrift
+    let layouts: Vec<Vec<Run>> = blocks.iter().map(layout).collect();
+    let mut used: BTreeMap<String, BTreeSet<char>> = BTreeMap::new();
     for (b, runs) in blocks.iter().zip(&layouts) {
         for r in runs {
-            used.entry((b.font.clone(), r.bold)).or_default().extend(r.text.chars());
+            used.entry(b.font.clone()).or_default().extend(r.text.chars());
         }
     }
 
     // 2. Schriften einbetten
     let mut fonts = dictionary! {};
-    let mut embedded: HashMap<(String, bool), (String, HashMap<char, u16>)> = HashMap::new();
+    let mut embedded: HashMap<String, (String, HashMap<char, u16>)> = HashMap::new();
     let mut missing: Vec<String> = vec![];
-    for (n, ((family, bold), chars)) in used.iter().enumerate() {
-        let done = face(family, *bold)
-            .and_then(|(data, index)| embed_font(&mut doc, &data, index, chars, family));
-        match done {
+    for (n, (family, chars)) in used.iter().enumerate() {
+        match face(family).and_then(|(data, index)| embed_font(&mut doc, &data, index, chars, family)) {
             Some((id, map)) => {
                 let name = format!("FE{n}");
                 fonts.set(name.as_bytes().to_vec(), Object::Reference(id));
-                embedded.insert((family.clone(), *bold), (name, map));
+                embedded.insert(family.clone(), (name, map));
             }
-            None if !missing.contains(family) => missing.push(family.clone()),
-            None => {}
+            None => missing.push(family.clone()),
         }
     }
 
     // Helvetica als Rückfall
-    let helv = |doc: &mut Document, base: &str| {
-        doc.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base, "Encoding" => "WinAnsiEncoding",
-        })
-    };
-    let (helv_regular, helv_bold) = (helv(&mut doc, "Helvetica"), helv(&mut doc, "Helvetica-Bold"));
-    fonts.set("FEnv", Object::Reference(helv_regular));
-    fonts.set("FEnvB", Object::Reference(helv_bold));
+    let helvetica = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+    });
+    fonts.set("FEnv", Object::Reference(helvetica));
 
     // 3. Resources der Seite ergänzen (Fonts, Bilder)
     let mut res = match doc.get_page_resources(page_id) {
@@ -346,10 +217,10 @@ pub fn export_pdf(
         .map_err(|e| e.to_string())?
         .set("Resources", Object::Dictionary(res));
 
-    // 4. Text
+    // 4. Text (schwarz)
     for (b, runs) in blocks.iter().zip(&layouts) {
         for r in runs {
-            let (name, shown) = match embedded.get(&(b.font.clone(), r.bold)) {
+            let (name, shown) = match embedded.get(&b.font) {
                 Some((name, map)) => {
                     let hex: String = r
                         .text
@@ -358,7 +229,7 @@ pub fn export_pdf(
                         .collect();
                     (name.as_str(), format!("<{hex}>"))
                 }
-                None => (if r.bold { "FEnvB" } else { "FEnv" }, pdf_string(&r.text)),
+                None => ("FEnv", pdf_string(&r.text)),
             };
             content.push_str(&format!(
                 "BT /{name} {} Tf {:.2} {:.2} Td {shown} Tj ET\n",
@@ -528,51 +399,31 @@ mod tests {
         std::env::var_os("WEBSTAMP_SAMPLE").map(Into::into)
     }
 
-    fn block(text: &str, align: Align) -> Block {
-        Block { text: text.into(), pos: [10.0, 20.0], width_mm: 100.0, size_pt: 12.0, align, font: "Arial".into() }
-    }
-
-    /// Jedes Zeichen 2 mm breit, fett 3 mm.
-    fn m(s: &str, bold: bool) -> f32 {
-        s.chars().count() as f32 * if bold { 3.0 } else { 2.0 }
-    }
-
-    #[test]
-    fn bold_spans() {
-        assert_eq!(spans("a **b** c"), vec![("a ".into(), false), ("b".into(), true), (" c".into(), false)]);
-        assert_eq!(spans("**ab"), vec![("ab".into(), true)]);
+    fn block(text: &str) -> Block {
+        Block {
+            text: text.into(),
+            pos: [10.0, 20.0],
+            size_pt: 10.0,
+            font: "Arial".into(),
+            ascent_mm: 2.5,
+            pitch_mm: 4.75,
+        }
     }
 
     #[test]
-    fn layout_left_right_justify() {
-        let r = layout(&block("ab **cd**", Align::Left), &mut m);
-        assert_eq!(r.len(), 2);
-        assert_eq!((r[0].x_mm, r[1].x_mm, r[1].bold), (10.0, 10.0 + 6.0, true));
-
-        let r = layout(&block("abc  ", Align::Right), &mut m);
-        assert_eq!(r[0].x_mm, 110.0 - 6.0);
-
-        // Zeile 1 gestreckt (endet am rechten Rand), letzte Zeile linksbündig
-        let r = layout(&block("ab cd\nef gh", Align::Justify), &mut m);
-        assert_eq!(r.len(), 3);
-        assert_eq!(r[0].x_mm, 10.0);
-        assert_eq!(r[1].x_mm + 4.0, 110.0);
-        assert_eq!((r[2].x_mm, r[2].text.as_str()), (10.0, "ef gh"));
+    fn lines_drop_blanks_and_indent() {
+        let b = block("  Max Mustermann \n\n   Musterstraße 1\n\n12345 Musterstadt\n");
+        assert_eq!(b.lines(), vec!["Max Mustermann", "Musterstraße 1", "12345 Musterstadt"]);
     }
 
     #[test]
-    fn toggle_bold_wraps_and_unwraps() {
-        let mut t = String::from("Max Mustermann\nStraße 1");
-        let sel = toggle_bold(&mut t, (0, 14));
-        assert_eq!(t, "**Max Mustermann**\nStraße 1");
-        // Auswahl ohne Sterne innerhalb von **…** → entfernt sie wieder
-        let sel2 = toggle_bold(&mut t, (sel.0 + 2, sel.1 - 2));
-        assert_eq!(t, "Max Mustermann\nStraße 1");
-        assert_eq!(sel2, (0, 14));
-        // mehrere Zeilen
-        let mut t = String::from("a\nb");
-        toggle_bold(&mut t, (0, 3));
-        assert_eq!(t, "**a**\n**b**");
+    fn layout_is_left_aligned_with_fixed_pitch() {
+        let runs = layout(&block("a\n\nb\nc"));
+        assert_eq!(runs.len(), 3);
+        assert!(runs.iter().all(|r| r.x_mm == 10.0));
+        assert_eq!(runs[0].baseline_mm, 22.5);
+        assert!((runs[1].baseline_mm - runs[0].baseline_mm - 4.75).abs() < 1e-4);
+        assert!((runs[2].baseline_mm - runs[1].baseline_mm - 4.75).abs() < 1e-4);
     }
 
     fn blank_template() -> Template {
@@ -597,19 +448,11 @@ mod tests {
     #[test]
     fn embeds_subset_font() {
         let sf = crate::fonts::SystemFonts::load();
-        let Some(family) = sf.helvetica_like().map(str::to_owned) else { return };
-        let mut b = block("Ärger **GmbH**\nMüllerstraße 5", Align::Right);
-        b.font = family.clone();
+        let Some(family) = sf.allowed.first().cloned() else { return };
+        let mut b = block("Ärger GmbH\nMüllerstraße 5\n12345 Köln");
+        b.font = family;
         let out = std::env::temp_dir().join("env_embed_test.pdf");
-        let missing = export_pdf(
-            &blank_template(),
-            &[b],
-            &[],
-            &out,
-            &mut |_, s, bold| m(s, bold),
-            &|f, bold| sf.font_data(f, bold),
-        )
-        .unwrap();
+        let missing = export_pdf(&blank_template(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
         assert!(missing.is_empty(), "{missing:?}");
 
         // Die Teilschrift ist eingebettet und deutlich kleiner als die ganze Schrift.
@@ -626,30 +469,33 @@ mod tests {
         assert!(embedded.iter().all(|&n| n < 200_000), "Teilschrift zu groß: {embedded:?}");
     }
 
-    /// Manuelle Prüfung mit echter Vorlage und mehreren Systemschriften (`cargo test -- --ignored`).
+    /// Manuelle Prüfung des Zeilenabstands: PDF mit Unter- und Oberlängen (`cargo test -- --ignored`).
     #[test]
     #[ignore]
-    fn export_real_fonts() {
+    fn write_line_gap_sample() {
         let sf = crate::fonts::SystemFonts::load();
-        let Some(sample) = sample() else { return };
-        let t = load(&sample).unwrap();
-        let families = ["Times New Roman", "Verdana", "Georgia", "Consolas", "Segoe UI", "Bahnschrift"];
-        let blocks: Vec<Block> = families
-            .iter()
-            .enumerate()
-            .map(|(i, f)| Block {
-                text: format!("{f}: **Ärger GmbH** €\nMüllerstraße 5, 12345 Köln"),
-                pos: [12.0, 20.0 + i as f32 * 20.0],
-                width_mm: 110.0,
-                size_pt: 12.0,
-                align: if i % 3 == 0 { Align::Left } else if i % 3 == 1 { Align::Right } else { Align::Justify },
-                font: f.to_string(),
-            })
-            .collect();
-        let out = std::env::temp_dir().join("env_fonts_test.pdf");
-        let mut measure = |b: &Block, s: &str, bold: bool| sf.text_width_mm(&b.font, bold, s, b.size_pt);
-        let missing = export_pdf(&t, &blocks, &[], &out, &mut measure, &|f, b| sf.font_data(f, b)).unwrap();
-        println!("fehlend: {missing:?} → {}", out.display());
+        let family = sf.allowed.first().cloned().expect("keine erlaubte Schrift");
+        let (up, down) = sf.line_metrics(&family).unwrap();
+        let (size, gap) = (10.0f32, 1.25f32);
+        let em_mm = size / PT_PER_MM;
+        let b = Block {
+            text: "gjpqy gjpqy\nbdfhkl bdfhkl\ngjpqy gjpqy".into(),
+            pos: [20.0, 20.0],
+            size_pt: size,
+            font: family.clone(),
+            ascent_mm: up * em_mm,
+            pitch_mm: (up + down) * em_mm + gap,
+        };
+        let out = std::env::temp_dir().join("env_gap.pdf");
+        export_pdf(&blank_template(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
+        println!("{family}: up {up:.3} down {down:.3} em, Soll-Abstand {gap} mm → {}", out.display());
+    }
+
+    #[test]
+    fn export_falls_back_to_helvetica() {
+        let out = std::env::temp_dir().join("env_fallback_test.pdf");
+        let missing = export_pdf(&blank_template(), &[block("Ärger\nKöln")], &[], &out, &|_| None).unwrap();
+        assert_eq!(missing, vec!["Arial".to_string()]);
     }
 
     #[test]
@@ -660,14 +506,10 @@ mod tests {
         let r = render_template(&t, 150.0).unwrap();
         let dark = r.rgba.chunks(4).filter(|p| p[0] < 128).count();
         assert!(dark > 1000, "Stempel wurde nicht gerendert ({dark})");
-        let blocks = vec![block("Ärger **GmbH**\nMüllerstraße 5\n12345 Köln", Align::Right)];
-        let out = std::env::temp_dir().join("env_test.pdf");
         let img = crate::graphic::Graphic::Raster(image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255])));
         let placed = [Placed { img: &img, pos: [12.0, 100.0], width_mm: 40.0 }];
         assert_eq!(placed[0].height_mm(), 20.0);
-        // ohne Schriftdaten → Helvetica-Rückfall, Familie wird gemeldet
-        let missing = export_pdf(&t, &blocks, &placed, &out, &mut |_, s, bold| m(s, bold), &|_, _| None).unwrap();
-        assert_eq!(missing, vec!["Arial".to_string()]);
-        println!("{}", out.display());
+        let out = std::env::temp_dir().join("env_test.pdf");
+        export_pdf(&t, &[block("Ärger GmbH\nMüllerstraße 5\n12345 Köln")], &placed, &out, &|_| None).unwrap();
     }
 }
