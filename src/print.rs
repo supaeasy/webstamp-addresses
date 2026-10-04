@@ -1,6 +1,6 @@
 //! Direktdruck über GDI: Druckdialog, Stempel als Bitmap, Adressen als Vektortext.
 
-use crate::stamp::{Block, Raster};
+use crate::stamp::{Block, Placed, Raster};
 use windows::Win32::Foundation::{COLORREF, HGLOBAL};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::Xps::{DOCINFOW, EndDoc, EndPage, StartDocW, StartPage};
@@ -22,6 +22,7 @@ pub struct Job<'a> {
     pub stamp: &'a Raster,
     pub stamp_dpi: f32,
     pub blocks: &'a [Block],
+    pub images: &'a [Placed<'a>],
     pub flip_180: bool,
     pub offset_mm: [f32; 2],
 }
@@ -106,6 +107,9 @@ unsafe fn draw(hdc: HDC, job: &Job) -> Result<(), String> {
         }
 
         draw_stamp(hdc, job, rot, dpi_x, &map);
+        for p in job.images {
+            draw_image(hdc, p, rot, mm_x, mm_y, &map);
+        }
 
         // Text
         SetBkMode(hdc, TRANSPARENT);
@@ -214,6 +218,54 @@ unsafe fn draw_stamp(hdc: HDC, job: &Job, rot: u32, dpi_x: f32, map: &dyn Fn(f32
             dy.round() as i32,
             dw,
             dh,
+            0,
+            0,
+            rw as i32,
+            rh as i32,
+            Some(buf.as_ptr() as *const _),
+            &bmi,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    }
+}
+
+/// Zeichnet ein Bild in Druckerauflösung (Transparenz wird auf Weiß gerechnet).
+unsafe fn draw_image(hdc: HDC, p: &Placed, rot: u32, mm_x: f32, mm_y: f32, map: &dyn Fn(f32, f32) -> (f32, f32)) {
+    let (w_mm, h_mm) = (p.width_mm, p.height_mm());
+    let (tw, th) = (((w_mm * mm_x).round() as u32).max(1), ((h_mm * mm_y).round() as u32).max(1));
+    let resized = image::imageops::resize(p.img, tw, th, image::imageops::FilterType::CatmullRom);
+
+    let mut bgra = Vec::with_capacity(tw as usize * th as usize * 4);
+    for px in resized.pixels() {
+        let a = px[3] as u32;
+        let over_white = |v: u8| ((v as u32 * a + 255 * (255 - a)) / 255) as u8;
+        bgra.extend_from_slice(&[over_white(px[2]), over_white(px[1]), over_white(px[0]), 255]);
+    }
+    let (buf, rw, rh) = rotate(&bgra, tw as usize, th as usize, rot);
+
+    let (ax, ay) = map(p.pos[0], p.pos[1]);
+    let (bx, by) = map(p.pos[0] + w_mm, p.pos[1] + h_mm);
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: rw as i32,
+            biHeight: -(rh as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    unsafe {
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchDIBits(
+            hdc,
+            ax.min(bx).round() as i32,
+            ay.min(by).round() as i32,
+            rw as i32,
+            rh as i32,
             0,
             0,
             rw as i32,

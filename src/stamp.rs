@@ -38,6 +38,19 @@ pub struct Run {
     pub bold: bool,
 }
 
+/// Ein platziertes Bild (links oben `pos`, Breite in mm; die Höhe ergibt sich aus dem Seitenverhältnis).
+pub struct Placed<'a> {
+    pub img: &'a image::RgbaImage,
+    pub pos: [f32; 2],
+    pub width_mm: f32,
+}
+
+impl Placed<'_> {
+    pub fn height_mm(&self) -> f32 {
+        self.width_mm * self.img.height() as f32 / self.img.width() as f32
+    }
+}
+
 impl Block {
     pub fn line_height_mm(&self) -> f32 {
         self.size_pt * 1.2 / PT_PER_MM
@@ -221,6 +234,7 @@ pub fn render_template(t: &Template, dpi: f32) -> Result<Raster, String> {
 pub fn export_pdf(
     t: &Template,
     blocks: &[Block],
+    images: &[Placed],
     out: &Path,
     measure: &mut dyn FnMut(&Block, &str, bool) -> f32,
 ) -> Result<(), String> {
@@ -252,11 +266,59 @@ pub fn export_pdf(
     fonts.set("FEnv", Object::Reference(font_regular));
     fonts.set("FEnvB", Object::Reference(font_bold));
     res.set("Font", Object::Dictionary(fonts));
+
+    // Bilder als RGB-XObjects (Transparenz auf Weiß gerechnet, auf max. 2400 px begrenzt).
+    let mut xobjects = match res.get(b"XObject") {
+        Ok(Object::Dictionary(d)) => d.clone(),
+        Ok(Object::Reference(id)) => doc.get_dictionary(*id).cloned().unwrap_or_default(),
+        _ => Default::default(),
+    };
+    let mut content = String::from("q\n0 g\n");
+    for (i, p) in images.iter().enumerate() {
+        let (w, h) = (p.img.width(), p.img.height());
+        let big = w.max(h);
+        let small;
+        let src = if big > 2400 {
+            let f = 2400.0 / big as f32;
+            small = image::imageops::resize(
+                p.img,
+                ((w as f32 * f) as u32).max(1),
+                ((h as f32 * f) as u32).max(1),
+                image::imageops::FilterType::Triangle,
+            );
+            &small
+        } else {
+            p.img
+        };
+        let mut rgb = Vec::with_capacity(src.width() as usize * src.height() as usize * 3);
+        for px in src.pixels() {
+            let a = px[3] as u32;
+            rgb.extend([px[0], px[1], px[2]].map(|v| ((v as u32 * a + 255 * (255 - a)) / 255) as u8));
+        }
+        let mut stream = Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => src.width() as i64, "Height" => src.height() as i64,
+                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+            },
+            rgb,
+        );
+        let _ = stream.compress();
+        let name = format!("ImEnv{i}");
+        xobjects.set(name.as_bytes().to_vec(), Object::Reference(doc.add_object(stream)));
+        content.push_str(&format!(
+            "q {:.2} 0 0 {:.2} {:.2} {:.2} cm /{name} Do Q\n",
+            p.width_mm * PT_PER_MM,
+            p.height_mm() * PT_PER_MM,
+            p.pos[0] * PT_PER_MM,
+            page_h_pt - (p.pos[1] + p.height_mm()) * PT_PER_MM,
+        ));
+    }
+    res.set("XObject", Object::Dictionary(xobjects));
     doc.get_dictionary_mut(page_id)
         .map_err(|e| e.to_string())?
         .set("Resources", Object::Dictionary(res));
 
-    let mut content = String::from("q\n0 g\n");
     for b in blocks {
         for r in layout(b, &mut |text, bold| measure(b, text, bold)) {
             content.push_str(&format!(
@@ -362,7 +424,10 @@ mod tests {
         assert!(dark > 1000, "Stempel wurde nicht gerendert ({dark})");
         let blocks = vec![block("Ärger **GmbH**\nMüllerstraße 5\n12345 Köln", Align::Right)];
         let out = std::env::temp_dir().join("env_test.pdf");
-        export_pdf(&t, &blocks, &out, &mut |_, s, bold| m(s, bold)).unwrap();
+        let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
+        let placed = [Placed { img: &img, pos: [12.0, 100.0], width_mm: 40.0 }];
+        assert_eq!(placed[0].height_mm(), 20.0);
+        export_pdf(&t, &blocks, &placed, &out, &mut |_, s, bold| m(s, bold)).unwrap();
         println!("{}", out.display());
     }
 }

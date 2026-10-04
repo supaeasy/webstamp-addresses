@@ -8,7 +8,7 @@ dirs = "7.0.0"
 eframe = "0.36.2"
 fontdb = "0.24.0"
 hayro = "0.8.0"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 lopdf = "0.45.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

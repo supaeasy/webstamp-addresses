@@ -7,7 +7,7 @@ mod stamp;
 
 use config::{BlockCfg, Config};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use stamp::{Align, Block, PT_PER_MM, Raster, Template};
+use stamp::{Align, Block, PT_PER_MM, Placed, Raster, Template};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -53,6 +53,19 @@ struct Loaded {
     texture: egui::TextureHandle,
 }
 
+struct LoadedImage {
+    rgba: image::RgbaImage,
+    texture: egui::TextureHandle,
+}
+
+/// Das einzusetzende Bild als `Placed` (nur wenn geladen und aktiviert).
+fn placed<'a>(img: &'a Option<LoadedImage>, cfg: &config::ImageCfg) -> Vec<Placed<'a>> {
+    match img {
+        Some(im) if cfg.show => vec![Placed { img: &im.rgba, pos: cfg.pos, width_mm: cfg.width_mm }],
+        _ => vec![],
+    }
+}
+
 /// Zustand eines Schriftauswahl-Feldes (Eingabepuffer, Vorschlagsliste offen).
 #[derive(Default)]
 struct FontPicker {
@@ -67,6 +80,7 @@ struct App {
     sender_text: String,
     recipient_text: String,
     loaded: Option<Loaded>,
+    image: Option<LoadedImage>,
     print_state: print::PrintState,
     status: String,
     applied_dark: Option<bool>,
@@ -98,6 +112,7 @@ impl App {
             cfg,
             recipient_text: String::new(),
             loaded: None,
+            image: None,
             print_state: Default::default(),
             applied_dark: None,
             content_h: 0.0,
@@ -109,6 +124,9 @@ impl App {
             fonts_dirty: false,
             status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
         };
+        if let Some(p) = app.cfg.image.path.clone() {
+            app.load_image(&cc.egui_ctx, &p);
+        }
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
         if let Some(p) = arg.or_else(|| app.cfg.last_template.clone()) {
             if p.exists() {
@@ -137,6 +155,48 @@ impl App {
                 self.loaded = Some(Loaded { path: path.to_path_buf(), template, raster, texture });
             }
             Err(e) => self.status = format!("Fehler: {e}"),
+        }
+    }
+
+    fn load_image(&mut self, ctx: &egui::Context, path: &Path) {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                // Für die Vorschau reicht eine verkleinerte Textur.
+                let (w, h) = rgba.dimensions();
+                let big = w.max(h);
+                let small = (big > 1024).then(|| {
+                    let f = 1024.0 / big as f32;
+                    image::imageops::resize(
+                        &rgba,
+                        ((w as f32 * f) as u32).max(1),
+                        ((h as f32 * f) as u32).max(1),
+                        image::imageops::FilterType::Triangle,
+                    )
+                });
+                let tex_src = small.as_ref().unwrap_or(&rgba);
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [tex_src.width() as usize, tex_src.height() as usize],
+                    tex_src.as_raw(),
+                );
+                let texture = ctx.load_texture("image", color, egui::TextureOptions::LINEAR);
+                self.cfg.image.path = Some(path.to_path_buf());
+                self.status = format!("Bild geladen: {} ({w} × {h} px)", path.file_name().unwrap_or_default().to_string_lossy());
+                self.image = Some(LoadedImage { rgba, texture });
+            }
+            Err(e) => {
+                self.image = None;
+                self.status = format!("Bild nicht lesbar: {e}");
+            }
+        }
+    }
+
+    fn pick_image(&mut self, ctx: &egui::Context) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Bilder", &["png", "jpg", "jpeg", "bmp", "gif"])
+            .pick_file()
+        {
+            self.load_image(ctx, &p);
         }
     }
 
@@ -173,7 +233,9 @@ impl App {
     fn do_print(&mut self) {
         let Some(l) = &self.loaded else { return };
         let blocks = self.blocks();
+        let images = placed(&self.image, &self.cfg.image);
         let job = print::Job {
+            images: &images,
             name: "Umschlag",
             env_w_mm: l.template.width_mm,
             env_h_mm: l.template.height_mm,
@@ -212,7 +274,8 @@ impl App {
                 Some(sf) => sf.text_width_mm("Arial", bold, text, b.size_pt),
                 None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
             };
-            self.status = match stamp::export_pdf(&l.template, &self.blocks(), &out, &mut measure) {
+            let images = placed(&self.image, &self.cfg.image);
+            self.status = match stamp::export_pdf(&l.template, &self.blocks(), &images, &out, &mut measure) {
                 Ok(()) => format!("Gespeichert: {} (Schrift: Helvetica)", out.display()),
                 Err(e) => format!("Fehler: {e}"),
             };
@@ -296,6 +359,34 @@ impl App {
         card(ui, "Empfänger", |ui| self.block_controls(ui, 0));
         card(ui, "Absender", |ui| self.block_controls(ui, 1));
 
+        card(ui, "Bild", |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Bild wählen…").clicked() {
+                    self.pick_image(&ctx);
+                }
+                if ui.add_enabled(self.image.is_some(), egui::Button::new("Entfernen")).clicked() {
+                    self.image = None;
+                    self.cfg.image.path = None;
+                }
+            });
+            let name = self
+                .cfg
+                .image
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Kein Bild gewählt (z. B. Logo)".into());
+            ui.label(egui::RichText::new(name).small().color(muted()));
+            ui.add_enabled_ui(self.image.is_some(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.cfg.image.show, "Drucken");
+                    ui.label("Breite");
+                    ui.add(egui::DragValue::new(&mut self.cfg.image.width_mm).speed(0.5).range(5.0..=200.0).suffix(" mm"));
+                });
+            });
+        });
+
         card(ui, "Positionen", |ui| {
             ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(muted()));
             egui::Grid::new("pos").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -305,6 +396,11 @@ impl App {
                 ui.label("Absender");
                 pos_drag(ui, &mut self.cfg.sender_block.pos);
                 ui.end_row();
+                if self.image.is_some() {
+                    ui.label("Bild");
+                    pos_drag(ui, &mut self.cfg.image.pos);
+                    ui.end_row();
+                }
             });
             ui.checkbox(&mut self.cfg.show_zones, "Zonen der Schweizer Post (nur Vorschau)");
             ui.checkbox(&mut self.cfg.show_guides, "Hilfslinien (nur Vorschau)");
@@ -417,6 +513,38 @@ impl App {
                 self.cfg.guide_v = (self.cfg.guide_v + resp.drag_delta().x / s).clamp(0.0, ew);
             }
             painter.text(Pos2::new(x + 4.0, env.min.y + 2.0), Align2::LEFT_TOP, format!("{:.1} mm", self.cfg.guide_v), FontId::proportional(11.0), col);
+        }
+
+        // Bild: verschieben (Fläche) und skalieren (Eckgriff unten rechts, Seitenverhältnis bleibt).
+        if let (Some(im), true) = (&self.image, self.cfg.image.show) {
+            let w_mm = self.cfg.image.width_mm;
+            let h_mm = w_mm * im.rgba.height() as f32 / im.rgba.width() as f32;
+            let rect = Rect::from_min_size(
+                env.min + Vec2::new(self.cfg.image.pos[0], self.cfg.image.pos[1]) * s,
+                Vec2::new(w_mm * s, h_mm * s),
+            );
+            painter.image(im.texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            let body = ui.interact(rect, egui::Id::new("image_body"), Sense::click_and_drag());
+            let handle = Rect::from_center_size(rect.right_bottom(), Vec2::splat(14.0));
+            let grip = ui.interact(handle, egui::Id::new("image_resize"), Sense::drag());
+            let blue = Color32::from_rgb(40, 120, 220);
+            if body.hovered() || body.dragged() || grip.hovered() || grip.dragged() {
+                painter.rect_stroke(rect, 0.0, Stroke::new(1.0, blue), egui::StrokeKind::Middle);
+                painter.rect_filled(handle.shrink(2.0), 2.0, blue);
+            }
+            if grip.hovered() || grip.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+            } else if body.hovered() || body.dragged() {
+                ui.ctx().set_cursor_icon(if body.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            if grip.dragged() {
+                self.cfg.image.width_mm = (w_mm + grip.drag_delta().x / s).clamp(5.0, ew);
+            } else if body.dragged() {
+                let d = body.drag_delta() / s;
+                let pos = &mut self.cfg.image.pos;
+                pos[0] = (pos[0] + d.x).clamp(0.0, ew - 5.0);
+                pos[1] = (pos[1] + d.y).clamp(0.0, eh - 5.0);
+            }
         }
 
         let px_per_pt = s / PT_PER_MM;

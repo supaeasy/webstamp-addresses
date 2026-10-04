@@ -15,6 +15,7 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 - **Empfänger- und Absenderadresse** (mehrzeilig), Schriftgröße je Block einstellbar.
 - **Standard-Absender:** einmal speichern („Als Standard speichern“), danach immer vorbelegt. Der Absender lässt sich pro Umschlag abschalten.
 - **Frei verschiebbare Adressblöcke:** per Maus in der Vorschau ziehen oder die Position in mm eingeben. Die Positionen werden gespeichert.
+- **Bild einfügen** (z. B. Logo; PNG, JPG, BMP, GIF, auch mit Transparenz): frei verschiebbar wie die Adressblöcke, Größe über den Eckgriff oder die Breite in mm (Seitenverhältnis bleibt). Wird mitgedruckt und ins PDF übernommen.
 - **Zonen der Schweizer Post** (nur Vorschau, hellblau): Frankierzone, Absenderzone, Codierzone und Lesezone nach den [Spezifikationen Briefgestaltung](https://www.post.ch/briefgestaltung) der Post (Format bis B5, quer), damit Adressen maschinenlesbar platziert werden.
 - **Hilfslinien:** eine horizontale und eine vertikale Linie, frei verschiebbar (nur Vorschau, werden nicht gedruckt).
 - **Direktdruck** über den Windows-Druckdialog (Drucker und Papierformat C5 wählbar). Der Umschlag wird bei Hochformat-Einzug automatisch gedreht; zusätzlich „180° drehen“ und ein Feinversatz in mm für die Druckerjustage.
@@ -63,6 +64,7 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 - **Recipient and sender address** (multi-line) with a font size per block.
 - **Default sender:** save it once (“Als Standard speichern”) and it is pre-filled from then on. The sender can be switched off per envelope.
 - **Freely movable address blocks:** drag them in the preview or enter the position in mm. Positions are persisted.
+- **Insert an image** (e.g. a logo; PNG, JPG, BMP, GIF, transparency supported): freely movable like the address blocks, resizable via the corner handle or the width in mm (aspect ratio is kept). It is printed and included in the PDF export.
 - **Swiss Post zones** (preview only, light blue): franking, sender, coding and reading zone according to the Post's [letter design specifications](https://www.post.ch/briefgestaltung) (format up to B5, landscape), so addresses are placed machine-readably.
 - **Guide lines:** one horizontal and one vertical line, freely movable (preview only, never printed).
 - **Direct printing** through the Windows print dialog (choose printer and paper size C5). The envelope is rotated automatically for portrait paper feeds; there is also a “rotate 180°” option and a fine offset in mm for printer calibration.

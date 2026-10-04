@@ -31,6 +31,22 @@ impl Default for BlockCfg {
     }
 }
 
+/// Einsetzbares Bild (z. B. Logo); Position links oben und Breite in mm.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct ImageCfg {
+    pub path: Option<PathBuf>,
+    pub show: bool,
+    pub pos: [f32; 2],
+    pub width_mm: f32,
+}
+
+impl Default for ImageCfg {
+    fn default() -> Self {
+        Self { path: None, show: true, pos: [12.0, 45.0], width_mm: 40.0 }
+    }
+}
+
 /// Persistente Einstellungen (Positionen in mm, gemessen von links oben auf dem Umschlag).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -40,6 +56,7 @@ pub struct Config {
     pub print_sender: bool,
     pub recipient: BlockCfg,
     pub sender_block: BlockCfg,
+    pub image: ImageCfg,
     /// Umschlag beim Druck um 180° drehen (je nach Einzug des Druckers).
     pub flip_180: bool,
     /// Feinjustierung des Druckers in mm.
@@ -60,6 +77,7 @@ impl Default for Config {
             print_sender: true,
             recipient: BlockCfg::recipient(),
             sender_block: BlockCfg::sender(),
+            image: ImageCfg::default(),
             flip_180: false,
             print_offset: [0.0, 0.0],
             last_template: None,
