@@ -20,7 +20,7 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 - **Direktdruck** über den Windows-Druckdialog (Drucker und Papierformat C5 wählbar). Der Umschlag wird bei Hochformat-Einzug automatisch gedreht; zusätzlich „180° drehen“ und ein Feinversatz in mm für die Druckerjustage.
 - **Als PDF speichern** zur Kontrolle vor dem Druck.
 - **Schrift, Ausrichtung und Breite pro Adressfeld:** Empfänger und Absender haben je eigene Schriftart (Auswahlfeld mit Autovervollständigung über alle installierten Schriften), Größe, Textbreite sowie Ausrichtung *Links*, *Blocksatz* oder *Rechts*.
-- **Fettdruck:** Text markieren und Strg+B (oder Button **B**) drücken – fette Teile werden im Text als \**fett**\ markiert und gedruckt.
+- **Fettdruck:** Text markieren und Strg+B (oder Button **B**) drücken – fette Teile werden im Text als `**fett**` markiert und gedruckt.
 - **Hell-/Dunkelmodus:** folgt automatisch dem Windows-Design.
 - Einstellungen werden automatisch gesichert unter `%APPDATA%\webstamp-addresses\config.json`.
 
@@ -68,7 +68,7 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 - **Direct printing** through the Windows print dialog (choose printer and paper size C5). The envelope is rotated automatically for portrait paper feeds; there is also a “rotate 180°” option and a fine offset in mm for printer calibration.
 - **Save as PDF** to check the result before printing.
 - **Font, alignment and width per address field:** recipient and sender each have their own font (search-as-you-type picker over all installed fonts), size, text width and alignment *left*, *justified* or *right*.
-- **Bold text:** select text and press Ctrl+B (or the **B** button) – bold parts are marked as \**bold**\ in the text and printed bold.
+- **Bold text:** select text and press Ctrl+B (or the **B** button) – bold parts are marked as `**bold**` in the text and printed bold.
 - **Light/dark mode:** follows the Windows theme automatically.
 - Settings are saved automatically to `%APPDATA%\webstamp-addresses\config.json`.
 
