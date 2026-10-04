@@ -19,6 +19,7 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 - **Hilfslinien:** eine horizontale und eine vertikale Linie, frei verschiebbar (nur Vorschau, werden nicht gedruckt).
 - **Direktdruck** über den Windows-Druckdialog (Drucker und Papierformat C5 wählbar). Der Umschlag wird bei Hochformat-Einzug automatisch gedreht; zusätzlich „180° drehen“ und ein Feinversatz in mm für die Druckerjustage.
 - **Als PDF speichern** zur Kontrolle vor dem Druck.
+- **Schriftart:** Auswahlfeld mit Autovervollständigung über alle installierten Schriften; die Vorschau zeigt die gewählte Schrift.
 - **Hell-/Dunkelmodus:** folgt automatisch dem Windows-Design.
 - Einstellungen werden automatisch gesichert unter `%APPDATA%\webstamp-addresses\config.json`.
 
@@ -65,6 +66,7 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 - **Guide lines:** one horizontal and one vertical line, freely movable (preview only, never printed).
 - **Direct printing** through the Windows print dialog (choose printer and paper size C5). The envelope is rotated automatically for portrait paper feeds; there is also a “rotate 180°” option and a fine offset in mm for printer calibration.
 - **Save as PDF** to check the result before printing.
+- **Font:** search-as-you-type picker listing all installed fonts; the preview uses the selected font.
 - **Light/dark mode:** follows the Windows theme automatically.
 - Settings are saved automatically to `%APPDATA%\webstamp-addresses\config.json`.
 

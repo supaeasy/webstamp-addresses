@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 dirs = "7.0.0"
 eframe = "0.36.2"
+fontdb = "0.24.0"
 hayro = "0.8.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 lopdf = "0.45.0"

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod fonts;
 mod print;
 mod stamp;
 
@@ -63,12 +64,25 @@ struct App {
     content_h: f32,
     sized: bool,
     frames: u32,
+    system_fonts: Option<fonts::SystemFonts>,
+    fonts_rx: Option<std::sync::mpsc::Receiver<fonts::SystemFonts>>,
+    /// Eingabepuffer der Schriftauswahl und ob die Vorschlagsliste offen ist.
+    font_query: String,
+    font_typed: bool,
+    font_open: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(&cc.egui_ctx);
         let cfg = Config::load();
+        // Installierte Schriften im Hintergrund einlesen.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = cc.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(fonts::SystemFonts::load());
+            ctx.request_repaint();
+        });
         let mut app = Self {
             sender_text: cfg.sender.clone(),
             saved_json: serde_json::to_string(&cfg).unwrap(),
@@ -80,6 +94,11 @@ impl App {
             content_h: 0.0,
             sized: false,
             frames: 0,
+            system_fonts: None,
+            fonts_rx: Some(rx),
+            font_query: String::new(),
+            font_typed: false,
+            font_open: false,
             status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
         };
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
@@ -89,6 +108,97 @@ impl App {
             }
         }
         app
+    }
+
+    /// Eingabefeld mit Autovervollständigung über alle installierten Schriftarten.
+    fn font_picker(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(sf) = &self.system_fonts else {
+            ui.label(egui::RichText::new("Schriften werden geladen…").small().color(muted()));
+            return;
+        };
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.font_query)
+                .desired_width(190.0)
+                .hint_text("Schriftart suchen…"),
+        );
+        if resp.gained_focus() {
+            self.font_open = true;
+            self.font_typed = false;
+        }
+        if resp.changed() {
+            self.font_open = true;
+            self.font_typed = true;
+        }
+
+        let mut chosen: Option<String> = None;
+        let q = self.font_query.trim().to_lowercase();
+        let matches: Vec<&String> = if self.font_typed && !q.is_empty() {
+            let (mut pre, mut rest): (Vec<&String>, Vec<&String>) = sf
+                .families
+                .iter()
+                .filter(|f| f.to_lowercase().contains(&q))
+                .partition(|f| f.to_lowercase().starts_with(&q));
+            pre.append(&mut rest);
+            pre
+        } else {
+            sf.families.iter().collect()
+        };
+
+        if resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            chosen = sf
+                .canonical(&self.font_query)
+                .map(str::to_owned)
+                .or_else(|| matches.first().map(|s| (*s).clone()));
+            if chosen.is_none() {
+                self.font_open = false;
+            }
+        }
+
+        if self.font_open {
+            let area = egui::Area::new(egui::Id::new("font_popup"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(resp.rect.left_bottom() + Vec2::new(0.0, 2.0))
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(resp.rect.width());
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            if matches.is_empty() {
+                                ui.label(egui::RichText::new("Keine passende Schrift").color(muted()));
+                            }
+                            for name in &matches {
+                                let selected = name.as_str() == self.cfg.font;
+                                if ui.selectable_label(selected, name.as_str()).clicked() {
+                                    chosen = Some((*name).clone());
+                                }
+                            }
+                        });
+                    });
+                });
+            // Klick außerhalb schließt die Liste.
+            let outside = ctx.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !resp.rect.contains(p) && !area.response.rect.contains(p))
+            });
+            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.font_open = false;
+            }
+        }
+
+        if let Some(name) = chosen {
+            if let Some(sf) = &self.system_fonts {
+                fonts::apply_preview_font(&ctx, sf.font_data(&name));
+            }
+            self.font_query = name.clone();
+            self.cfg.font = name;
+            self.font_open = false;
+            self.font_typed = false;
+        } else if !self.font_open && !resp.has_focus() {
+            // Ungültige Eingabe verwerfen, aktuelle Schrift wieder anzeigen.
+            self.font_query = self.cfg.font.clone();
+        }
     }
 
     fn load_template(&mut self, ctx: &egui::Context, path: &Path) {
@@ -275,7 +385,7 @@ impl App {
                 egui::CollapsingHeader::new(title).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Schriftart");
-                        ui.add(egui::TextEdit::singleline(&mut self.cfg.font).desired_width(140.0));
+                        self.font_picker(ui);
                     });
                     ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug)");
                     ui.horizontal(|ui| {
@@ -488,16 +598,24 @@ impl eframe::App for App {
         let dark = ui.visuals().dark_mode;
         DARK.store(dark, Ordering::Relaxed);
         // Einmalig: Fenster so hoch öffnen, dass die linke Leiste ohne Scrollen passt.
+        if let Some(rx) = &self.fonts_rx {
+            if let Ok(sf) = rx.try_recv() {
+                if let Some(name) = sf.canonical(&self.cfg.font).map(str::to_owned) {
+                    self.cfg.font = name;
+                }
+                fonts::apply_preview_font(&ctx, sf.font_data(&self.cfg.font));
+                self.font_query = self.cfg.font.clone();
+                self.system_fonts = Some(sf);
+                self.fonts_rx = None;
+            }
+        }
         self.frames += 1;
         if !self.sized && self.frames < 4 {
             ctx.request_repaint();
         }
         if !self.sized && self.frames >= 4 && self.content_h > 0.0 {
             self.sized = true;
-            // monitor_size wird unter Windows in physischen Pixeln geliefert → in Punkte umrechnen.
-            let monitor = ctx
-                .input(|i| i.viewport().monitor_size)
-                .map_or(Vec2::new(1280.0, 720.0), |m| m / ctx.pixels_per_point());
+            let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(Vec2::new(1280.0, 720.0));
             let want = self.content_h + 24.0 + 56.0; // Rand + untere Leiste
             let size = Vec2::new(1180.0f32.min(monitor.x - 40.0), want.min(monitor.y - 80.0).max(600.0));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
