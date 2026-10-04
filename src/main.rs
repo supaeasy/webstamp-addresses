@@ -10,6 +10,11 @@ use stamp::{Block, PT_PER_MM, Raster, Template};
 use std::path::{Path, PathBuf};
 
 const PREVIEW_DPI: f32 = 150.0;
+const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
+const MUTED: Color32 = Color32::from_rgb(100, 116, 139);
+const BORDER: Color32 = Color32::from_rgb(226, 232, 240);
+const SIDEBAR_BG: Color32 = Color32::from_rgb(241, 245, 249);
+const DESK_BG: Color32 = Color32::from_rgb(203, 213, 225);
 const PLACEHOLDER: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
 
 fn main() -> eframe::Result {
@@ -47,6 +52,7 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(&cc.egui_ctx);
+        setup_style(&cc.egui_ctx);
         let cfg = Config::load();
         let mut app = Self {
             sender_text: cfg.sender.clone(),
@@ -159,99 +165,123 @@ impl App {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let have = self.loaded.is_some();
+
+        // Kopfbereich
         ui.horizontal(|ui| {
-            if ui.button("Stempel-PDF öffnen…").clicked() {
-                self.open_dialog(&ctx);
-            }
-        });
-        ui.add_space(8.0);
-
-        ui.heading("Empfänger");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.recipient_text)
-                .desired_rows(5)
-                .desired_width(f32::INFINITY)
-                .hint_text("Name\nStraße Nr.\nPLZ Ort"),
-        );
-        size_row(ui, "Schrift (pt)", &mut self.cfg.recipient_size_pt);
-        ui.add_space(8.0);
-
-        ui.heading("Absender");
-        ui.checkbox(&mut self.cfg.print_sender, "Absender drucken");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.sender_text)
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
-        size_row(ui, "Schrift (pt)", &mut self.cfg.sender_size_pt);
-        ui.horizontal(|ui| {
-            let is_default = self.sender_text == self.cfg.sender;
-            if ui.add_enabled(!is_default, egui::Button::new("Als Standard speichern")).clicked() {
-                self.cfg.sender = self.sender_text.clone();
-            }
-            if ui.add_enabled(!is_default, egui::Button::new("Standard laden")).clicked() {
-                self.sender_text = self.cfg.sender.clone();
-            }
-        });
-        ui.add_space(8.0);
-
-        ui.heading("Positionen (mm)");
-        ui.label("Blöcke lassen sich auch in der Vorschau ziehen.");
-        egui::Grid::new("pos").num_columns(3).show(ui, |ui| {
-            ui.label("Empfänger");
-            pos_drag(ui, &mut self.cfg.recipient_pos);
-            ui.end_row();
-            ui.label("Absender");
-            pos_drag(ui, &mut self.cfg.sender_pos);
-            ui.end_row();
-        });
-        ui.checkbox(&mut self.cfg.show_guides, "Hilfslinien anzeigen (werden nicht gedruckt)");
-        if self.cfg.show_guides {
-            ui.horizontal(|ui| {
-                ui.label("Horizontal");
-                ui.add(egui::DragValue::new(&mut self.cfg.guide_h).speed(0.2).suffix(" mm").fixed_decimals(1));
-                ui.label("Vertikal");
-                ui.add(egui::DragValue::new(&mut self.cfg.guide_v).speed(0.2).suffix(" mm").fixed_decimals(1));
+            ui.label(egui::RichText::new("✉").size(26.0).color(ACCENT));
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Webstamp Addresses").strong().size(17.0));
+                let name = self
+                    .loaded
+                    .as_ref()
+                    .and_then(|l| l.path.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Keine Vorlage geladen".into());
+                ui.label(egui::RichText::new(name).small().color(MUTED));
             });
-        }        if ui.button("Positionen zurücksetzen").clicked() {
-            let d = Config::default();
-            self.cfg.recipient_pos = d.recipient_pos;
-            self.cfg.sender_pos = d.sender_pos;
-        }
-        ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Öffnen…").clicked() {
+                    self.open_dialog(&ctx);
+                }
+            });
+        });
+        ui.add_space(4.0);
 
-        ui.collapsing("Druckeinstellungen", |ui| {
+        card(ui, "Empfänger", |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.recipient_text)
+                    .desired_rows(5)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Name\nStraße Nr.\nPLZ Ort"),
+            );
+            size_row(ui, "Schriftgröße", &mut self.cfg.recipient_size_pt);
+        });
+
+        card(ui, "Absender", |ui| {
+            ui.checkbox(&mut self.cfg.print_sender, "Absender drucken");
+            ui.add_enabled(
+                self.cfg.print_sender,
+                egui::TextEdit::multiline(&mut self.sender_text)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Absender-Adresse"),
+            );
+            size_row(ui, "Schriftgröße", &mut self.cfg.sender_size_pt);
+            ui.horizontal(|ui| {
+                let is_default = self.sender_text == self.cfg.sender;
+                if ui.add_enabled(!is_default, egui::Button::new("Als Standard speichern")).clicked() {
+                    self.cfg.sender = self.sender_text.clone();
+                }
+                if ui.add_enabled(!is_default, egui::Button::new("Standard laden")).clicked() {
+                    self.sender_text = self.cfg.sender.clone();
+                }
+            });
+        });
+
+        card(ui, "Positionen", |ui| {
+            ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(MUTED));
+            egui::Grid::new("pos").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Empfänger");
+                pos_drag(ui, &mut self.cfg.recipient_pos);
+                ui.end_row();
+                ui.label("Absender");
+                pos_drag(ui, &mut self.cfg.sender_pos);
+                ui.end_row();
+            });
+            ui.checkbox(&mut self.cfg.show_guides, "Hilfslinien (nur Vorschau)");
+            if self.cfg.show_guides {
+                ui.horizontal(|ui| {
+                    ui.label("Horizontal");
+                    ui.add(egui::DragValue::new(&mut self.cfg.guide_h).speed(0.2).suffix(" mm").fixed_decimals(1));
+                    ui.label("Vertikal");
+                    ui.add(egui::DragValue::new(&mut self.cfg.guide_v).speed(0.2).suffix(" mm").fixed_decimals(1));
+                });
+            }
+            if ui.button("Positionen zurücksetzen").clicked() {
+                let d = Config::default();
+                self.cfg.recipient_pos = d.recipient_pos;
+                self.cfg.sender_pos = d.sender_pos;
+            }
+        });
+
+        card(ui, "Druckeinstellungen", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Schriftart");
-                ui.text_edit_singleline(&mut self.cfg.font);
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.font).desired_width(140.0));
             });
-            ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug des Druckers)");
+            ui.checkbox(&mut self.cfg.flip_180, "Um 180° drehen (Einzug)");
             ui.horizontal(|ui| {
-                ui.label("Versatz (mm) X/Y");
-                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[0]).speed(0.1).suffix(" mm"));
-                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[1]).speed(0.1).suffix(" mm"));
+                ui.label("Versatz");
+                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[0]).speed(0.1).prefix("x ").suffix(" mm"));
+                ui.add(egui::DragValue::new(&mut self.cfg.print_offset[1]).speed(0.1).prefix("y ").suffix(" mm"));
             });
-            ui.label("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.");
+            ui.label(egui::RichText::new("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.").small().color(MUTED));
         });
-        ui.add_space(12.0);
 
-        let have = self.loaded.is_some();
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let print_btn = egui::Button::new("Drucken…").min_size(Vec2::new(120.0, 32.0));
+            let print_btn = egui::Button::new(egui::RichText::new("Drucken…").strong().color(Color32::WHITE))
+                .fill(ACCENT)
+                .min_size(Vec2::new(140.0, 36.0));
             if ui.add_enabled(have, print_btn).clicked() {
                 self.do_print();
             }
-            if ui.add_enabled(have, egui::Button::new("Als PDF speichern…")).clicked() {
+            if ui.add_enabled(have, egui::Button::new("Als PDF speichern…").min_size(Vec2::new(0.0, 36.0))).clicked() {
                 self.save_pdf();
             }
         });
-        ui.add_space(8.0);
-        ui.label(&self.status);
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         let Some(l) = &self.loaded else {
-            ui.centered_and_justified(|ui| ui.label("Kein Stempel geladen"));
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new("Webstamp-PDF hierher ziehen\noder links „Öffnen…“ wählen")
+                        .size(18.0)
+                        .color(MUTED),
+                )
+            });
             return;
         };
         let (ew, eh) = (l.template.width_mm, l.template.height_mm);
@@ -260,7 +290,9 @@ impl App {
         let env = Rect::from_center_size(avail.center(), Vec2::new(ew * s, eh * s));
 
         let painter = ui.painter_at(ui.available_rect_before_wrap());
-        painter.rect_filled(env.translate(Vec2::new(3.0, 3.0)), 0.0, Color32::from_black_alpha(40));
+        for (grow, a) in [(10.0, 10u8), (6.0, 14), (3.0, 20)] {
+            painter.rect_filled(env.expand(grow).translate(Vec2::new(0.0, 4.0)), 6.0, Color32::from_black_alpha(a));
+        }
         painter.image(
             l.texture.id(),
             env,
@@ -346,6 +378,51 @@ impl App {
     }
 }
 
+fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(10)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).strong().size(14.0).color(ACCENT));
+            ui.add_space(2.0);
+            add(ui);
+        });
+    ui.add_space(4.0);
+}
+
+fn setup_style(ctx: &egui::Context) {
+    ctx.set_visuals(egui::Visuals::light());
+    ctx.global_style_mut(|style| {
+        style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+        style.spacing.button_padding = Vec2::new(12.0, 6.0);
+        style.spacing.interact_size.y = 26.0;
+        let v = &mut style.visuals;
+        v.selection.bg_fill = ACCENT;
+        v.hyperlink_color = ACCENT;
+        v.extreme_bg_color = Color32::from_rgb(248, 250, 252);
+        let r = egui::CornerRadius::same(7);
+        v.widgets.noninteractive.corner_radius = r;
+        v.widgets.inactive.corner_radius = r;
+        v.widgets.hovered.corner_radius = r;
+        v.widgets.active.corner_radius = r;
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(241, 245, 249);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 232, 240);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+        for (ts, size) in [
+            (egui::TextStyle::Body, 14.0),
+            (egui::TextStyle::Button, 14.0),
+            (egui::TextStyle::Small, 12.0),
+        ] {
+            if let Some(f) = style.text_styles.get_mut(&ts) {
+                f.size = size;
+            }
+        }
+    });
+}
+
 fn size_row(ui: &mut egui::Ui, label: &str, v: &mut f32) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -375,10 +452,25 @@ impl eframe::App for App {
             self.load_template(&ctx, &path);
         }
 
-        egui::Panel::left("controls").min_size(320.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
-        });
-        egui::CentralPanel::default().show(ui, |ui| self.preview(ui));
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::WHITE)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(&self.status).small().color(MUTED));
+            });
+        egui::Panel::left("controls")
+            .min_size(340.0)
+            .frame(egui::Frame::new().fill(SIDEBAR_BG).inner_margin(12))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(DESK_BG))
+            .show(ui, |ui| self.preview(ui));
 
         // Einstellungen automatisch sichern, sobald sich etwas geändert hat.
         let json = serde_json::to_string(&self.cfg).unwrap();
