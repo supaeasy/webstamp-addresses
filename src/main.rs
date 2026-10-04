@@ -3,6 +3,7 @@
 mod config;
 mod fonts;
 mod graphic;
+#[cfg(windows)]
 mod print;
 mod stamp;
 
@@ -51,6 +52,7 @@ fn main() -> eframe::Result {
 struct Loaded {
     path: PathBuf,
     template: Template,
+    #[cfg_attr(not(windows), allow(dead_code))] // nur der Windows-Druck braucht das Raster
     raster: Raster,
     texture: egui::TextureHandle,
 }
@@ -83,6 +85,7 @@ struct App {
     recipient_text: String,
     loaded: Option<Loaded>,
     image: Option<LoadedImage>,
+    #[cfg(windows)]
     print_state: print::PrintState,
     status: String,
     applied_dark: Option<bool>,
@@ -115,6 +118,7 @@ impl App {
             recipient_text: String::new(),
             loaded: None,
             image: None,
+            #[cfg(windows)]
             print_state: Default::default(),
             applied_dark: None,
             content_h: 0.0,
@@ -224,6 +228,32 @@ impl App {
         v
     }
 
+    /// macOS/Linux: PDF erzeugen und über CUPS (`lp`) an den Standarddrucker senden.
+    #[cfg(not(windows))]
+    fn do_print(&mut self) {
+        if self.loaded.is_none() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("webstamp-addresses-print.pdf");
+        let result = self.write_pdf(&tmp).and_then(|_| {
+            let out = std::process::Command::new("lp")
+                .args(["-o", "print-scaling=none"])
+                .arg(&tmp)
+                .output()
+                .map_err(|e| format!("„lp“ nicht verfügbar: {e}"))?;
+            if out.status.success() {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+            }
+        });
+        self.status = match result {
+            Ok(msg) => format!("An den Standarddrucker gesendet ({msg}). Schrift im PDF: Helvetica."),
+            Err(e) => format!("Druckfehler: {e}"),
+        };
+    }
+
+    #[cfg(windows)]
     fn do_print(&mut self) {
         let Some(l) = &self.loaded else { return };
         let blocks = self.blocks();
@@ -262,18 +292,25 @@ impl App {
             .map(|s| format!("{}_umschlag.pdf", s.to_string_lossy()))
             .unwrap_or_else(|| "umschlag.pdf".into());
         if let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() {
-            let sf = self.system_fonts.as_ref();
-            // Das PDF nutzt Helvetica (Arial-Metrik) – Breiten daher mit Arial messen.
-            let mut measure = |b: &Block, text: &str, bold: bool| match sf {
-                Some(sf) => sf.text_width_mm("Arial", bold, text, b.size_pt),
-                None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
-            };
-            let images = placed(&self.image, &self.cfg.image);
-            self.status = match stamp::export_pdf(&l.template, &self.blocks(), &images, &out, &mut measure) {
+            self.status = match self.write_pdf(&out) {
                 Ok(()) => format!("Gespeichert: {} (Schrift: Helvetica)", out.display()),
                 Err(e) => format!("Fehler: {e}"),
             };
         }
+    }
+
+    /// Schreibt Vorlage + Adressen + Bild als PDF.
+    fn write_pdf(&self, out: &Path) -> Result<(), String> {
+        let l = self.loaded.as_ref().ok_or("Keine Vorlage geladen")?;
+        let sf = self.system_fonts.as_ref();
+        // Das PDF nutzt Helvetica – Breiten daher mit einer metrikgleichen Schrift (Arial & Co.) messen.
+        let family = sf.and_then(|s| s.helvetica_like()).unwrap_or("Arial").to_string();
+        let mut measure = |b: &Block, text: &str, bold: bool| match sf {
+            Some(sf) => sf.text_width_mm(&family, bold, text, b.size_pt),
+            None => text.chars().count() as f32 * 0.5 * b.size_pt / PT_PER_MM,
+        };
+        let images = placed(&self.image, &self.cfg.image);
+        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &mut measure)
     }
 
     /// Eingaben und Einstellungen eines Adressblocks (0 = Empfänger, 1 = Absender).

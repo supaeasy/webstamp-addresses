@@ -26,6 +26,7 @@ pub struct Block {
     pub width_mm: f32,
     pub size_pt: f32,
     pub align: Align,
+    #[cfg_attr(not(windows), allow(dead_code))] // nur der Windows-Druck wählt die Schrift selbst
     pub font: String,
 }
 

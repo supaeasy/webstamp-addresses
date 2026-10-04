@@ -1,0 +1,102 @@
+name: Release
+
+# Baut bei jedem Tag "v*" die Programme für Windows, Linux und macOS und hängt sie an ein GitHub-Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest }
+          - { name: linux-x64, os: ubuntu-latest }
+          - { name: macos-universal, os: macos-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux-Abhängigkeiten
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Rust-Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Test
+        run: cargo test --release --locked -- --skip render_and_export
+
+      - name: Bauen (Windows / Linux)
+        if: runner.os != 'macOS'
+        run: cargo build --release --locked
+
+      - name: Bauen (macOS universal: Apple Silicon + Intel)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/webstamp-addresses \
+            target/aarch64-apple-darwin/release/webstamp-addresses \
+            target/x86_64-apple-darwin/release/webstamp-addresses
+
+      - name: Paket schnüren
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          NAME="webstamp-addresses-${VERSION}-${{ matrix.name }}"
+          mkdir -p dist/pkg
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/webstamp-addresses.exe dist/pkg/
+            cp README.md dist/pkg/
+            (cd dist/pkg && 7z a -tzip "../${NAME}.zip" . >/dev/null)
+          else
+            cp target/release/webstamp-addresses dist/pkg/
+            cp README.md dist/pkg/
+            chmod +x dist/pkg/webstamp-addresses
+            tar -C dist/pkg -czf "dist/${NAME}.tar.gz" .
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: GitHub-Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release anlegen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
