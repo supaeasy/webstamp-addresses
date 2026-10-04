@@ -16,6 +16,7 @@ fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 700.0])
+            .with_icon(window_icon())
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -388,4 +389,12 @@ impl eframe::App for App {
             self.saved_json = json;
         }
     }
+}
+
+fn window_icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("icon.png")
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData { rgba: img.into_raw(), width, height }
 }
