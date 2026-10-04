@@ -7,7 +7,7 @@ mod graphic;
 mod print;
 mod stamp;
 
-use config::{BlockCfg, Config};
+use config::{BlockCfg, Config, Destination};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use graphic::Graphic;
 use stamp::{Align, Block, PT_PER_MM, Placed, Raster, Template};
@@ -515,12 +515,31 @@ impl App {
             let rect_mm = |x0: f32, y0: f32, x1: f32, y1: f32| {
                 Rect::from_min_max(env.min + Vec2::new(x0, y0) * s, env.min + Vec2::new(x1, y1) * s)
             };
-            let zones = [
+            let mut zones = vec![
                 ("Frankierzone", rect_mm(ew - 74.0, 0.0, ew, 38.0), true),
-                ("Absenderzone", rect_mm(0.0, 0.0, 120.0, 40.0), true),
                 ("Codierzone (frei lassen)", rect_mm(ew - 140.0, eh - 15.0, ew, eh), true),
-                ("Lesezone: Empfängeradresse hier hinein", rect_mm(12.0, 40.0, ew - 12.0, eh - 15.0), false),
             ];
+            match self.cfg.destination {
+                Destination::Domestic => {
+                    zones.push(("Absenderzone", rect_mm(0.0, 0.0, 120.0, 40.0), true));
+                    zones.push(("Lesezone: Empfängeradresse hier hinein", rect_mm(12.0, 40.0, ew - 12.0, eh - 15.0), false));
+                }
+                Destination::Foreign => {
+                    // Ausland, „rechts adressiert“: L-förmige Absenderzone, Adressfeld rechts daneben
+                    // (20 mm Abstand zur Absenderzone, 10 mm unter ihrem oberen Teil, 12 mm Rand rechts).
+                    // Die Ausdehnung der Absenderzone ist aus den Proportionen der Grafik abgeleitet.
+                    let (top, strip) = (rect_mm(0.0, 0.0, 80.0, 50.0), rect_mm(0.0, 50.0, 58.0, 98.0));
+                    painter.rect_filled(top, 0.0, fill);
+                    painter.rect_filled(strip, 0.0, fill);
+                    let at = |x: f32, y: f32| env.min + Vec2::new(x, y) * s;
+                    painter.add(egui::Shape::closed_line(
+                        vec![at(0.0, 0.0), at(80.0, 0.0), at(80.0, 50.0), at(58.0, 50.0), at(58.0, 98.0), at(0.0, 98.0)],
+                        Stroke::new(1.0, blue),
+                    ));
+                    painter.text(top.min + Vec2::new(5.0, 4.0), Align2::LEFT_TOP, "Absenderzone (Richtwert)", FontId::proportional(11.0), blue);
+                    zones.push(("Adressfeld: Empfängeradresse hier hinein", rect_mm(78.0, 60.0, ew - 12.0, eh - 15.0), false));
+                }
+            }
             for (label, r, filled) in zones {
                 if filled {
                     painter.rect_filled(r, 0.0, fill);
@@ -939,7 +958,17 @@ impl eframe::App for App {
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(desk_bg()))
-            .show(ui, |ui| self.preview(ui));
+            .show(ui, |ui| {
+                // Art der Sendung: bestimmt die Zonen der Post in der Vorschau.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Sendung:").strong());
+                    ui.selectable_value(&mut self.cfg.destination, Destination::Domestic, "Inland");
+                    ui.selectable_value(&mut self.cfg.destination, Destination::Foreign, "Ausland");
+                });
+                self.preview(ui)
+            });
 
         // Einstellungen automatisch sichern, sobald sich etwas geändert hat.
         let json = serde_json::to_string(&self.cfg).unwrap();

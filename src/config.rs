@@ -31,6 +31,14 @@ impl Default for BlockCfg {
     }
 }
 
+/// Art der Sendung: bestimmt die Zonen der Post in der Vorschau.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Destination {
+    #[default]
+    Domestic,
+    Foreign,
+}
+
 /// Einsetzbares Bild (z. B. Logo); Position links oben und Breite in mm.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -68,6 +76,7 @@ pub struct Config {
     pub guide_v: f32,
     /// Zonen der Schweizer Post (nur Vorschau).
     pub show_zones: bool,
+    pub destination: Destination,
 }
 
 impl Default for Config {
@@ -85,6 +94,7 @@ impl Default for Config {
             guide_h: 80.0,
             guide_v: 110.0,
             show_zones: true,
+            destination: Destination::Domestic,
         }
     }
 }
