@@ -40,14 +40,14 @@ pub struct Run {
 
 /// Ein platziertes Bild (links oben `pos`, Breite in mm; die Höhe ergibt sich aus dem Seitenverhältnis).
 pub struct Placed<'a> {
-    pub img: &'a image::RgbaImage,
+    pub img: &'a crate::graphic::Graphic,
     pub pos: [f32; 2],
     pub width_mm: f32,
 }
 
 impl Placed<'_> {
     pub fn height_mm(&self) -> f32 {
-        self.width_mm * self.img.height() as f32 / self.img.width() as f32
+        self.width_mm * self.img.aspect()
     }
 }
 
@@ -275,21 +275,7 @@ pub fn export_pdf(
     };
     let mut content = String::from("q\n0 g\n");
     for (i, p) in images.iter().enumerate() {
-        let (w, h) = (p.img.width(), p.img.height());
-        let big = w.max(h);
-        let small;
-        let src = if big > 2400 {
-            let f = 2400.0 / big as f32;
-            small = image::imageops::resize(
-                p.img,
-                ((w as f32 * f) as u32).max(1),
-                ((h as f32 * f) as u32).max(1),
-                image::imageops::FilterType::Triangle,
-            );
-            &small
-        } else {
-            p.img
-        };
+        let src = p.img.for_pdf(p.width_mm, p.height_mm());
         let mut rgb = Vec::with_capacity(src.width() as usize * src.height() as usize * 3);
         for px in src.pixels() {
             let a = px[3] as u32;
@@ -424,7 +410,7 @@ mod tests {
         assert!(dark > 1000, "Stempel wurde nicht gerendert ({dark})");
         let blocks = vec![block("Ärger **GmbH**\nMüllerstraße 5\n12345 Köln", Align::Right)];
         let out = std::env::temp_dir().join("env_test.pdf");
-        let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
+        let img = crate::graphic::Graphic::Raster(image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255])));
         let placed = [Placed { img: &img, pos: [12.0, 100.0], width_mm: 40.0 }];
         assert_eq!(placed[0].height_mm(), 20.0);
         export_pdf(&t, &blocks, &placed, &out, &mut |_, s, bold| m(s, bold)).unwrap();

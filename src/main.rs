@@ -2,11 +2,13 @@
 
 mod config;
 mod fonts;
+mod graphic;
 mod print;
 mod stamp;
 
 use config::{BlockCfg, Config};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use graphic::Graphic;
 use stamp::{Align, Block, PT_PER_MM, Placed, Raster, Template};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,14 +56,14 @@ struct Loaded {
 }
 
 struct LoadedImage {
-    rgba: image::RgbaImage,
+    gfx: Graphic,
     texture: egui::TextureHandle,
 }
 
 /// Das einzusetzende Bild als `Placed` (nur wenn geladen und aktiviert).
 fn placed<'a>(img: &'a Option<LoadedImage>, cfg: &config::ImageCfg) -> Vec<Placed<'a>> {
     match img {
-        Some(im) if cfg.show => vec![Placed { img: &im.rgba, pos: cfg.pos, width_mm: cfg.width_mm }],
+        Some(im) if cfg.show => vec![Placed { img: &im.gfx, pos: cfg.pos, width_mm: cfg.width_mm }],
         _ => vec![],
     }
 }
@@ -159,30 +161,22 @@ impl App {
     }
 
     fn load_image(&mut self, ctx: &egui::Context, path: &Path) {
-        match image::open(path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                // Für die Vorschau reicht eine verkleinerte Textur.
-                let (w, h) = rgba.dimensions();
-                let big = w.max(h);
-                let small = (big > 1024).then(|| {
-                    let f = 1024.0 / big as f32;
-                    image::imageops::resize(
-                        &rgba,
-                        ((w as f32 * f) as u32).max(1),
-                        ((h as f32 * f) as u32).max(1),
-                        image::imageops::FilterType::Triangle,
-                    )
-                });
-                let tex_src = small.as_ref().unwrap_or(&rgba);
+        match Graphic::load(path) {
+            Ok(gfx) => {
+                // Für die Vorschau reicht eine Textur mit begrenzter Größe (SVG: höher, damit es scharf bleibt).
+                let tex = gfx.preview(if gfx.is_vector() { 2048 } else { 1024 });
                 let color = egui::ColorImage::from_rgba_unmultiplied(
-                    [tex_src.width() as usize, tex_src.height() as usize],
-                    tex_src.as_raw(),
+                    [tex.width() as usize, tex.height() as usize],
+                    tex.as_raw(),
                 );
                 let texture = ctx.load_texture("image", color, egui::TextureOptions::LINEAR);
                 self.cfg.image.path = Some(path.to_path_buf());
-                self.status = format!("Bild geladen: {} ({w} × {h} px)", path.file_name().unwrap_or_default().to_string_lossy());
-                self.image = Some(LoadedImage { rgba, texture });
+                self.status = format!(
+                    "Grafik geladen: {} ({})",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    gfx.describe()
+                );
+                self.image = Some(LoadedImage { gfx, texture });
             }
             Err(e) => {
                 self.image = None;
@@ -193,7 +187,7 @@ impl App {
 
     fn pick_image(&mut self, ctx: &egui::Context) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Bilder", &["png", "jpg", "jpeg", "bmp", "gif"])
+            .add_filter("Bilder und Vektorgrafiken", &["png", "jpg", "jpeg", "bmp", "gif", "svg", "svgz"])
             .pick_file()
         {
             self.load_image(ctx, &p);
@@ -376,7 +370,7 @@ impl App {
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Kein Bild gewählt (z. B. Logo)".into());
+                .unwrap_or_else(|| "Kein Bild gewählt (PNG, JPG, SVG …)".into());
             ui.label(egui::RichText::new(name).small().color(muted()));
             ui.add_enabled_ui(self.image.is_some(), |ui| {
                 ui.horizontal(|ui| {
@@ -518,7 +512,7 @@ impl App {
         // Bild: verschieben (Fläche) und skalieren (Eckgriff unten rechts, Seitenverhältnis bleibt).
         if let (Some(im), true) = (&self.image, self.cfg.image.show) {
             let w_mm = self.cfg.image.width_mm;
-            let h_mm = w_mm * im.rgba.height() as f32 / im.rgba.width() as f32;
+            let h_mm = w_mm * im.gfx.aspect();
             let rect = Rect::from_min_size(
                 env.min + Vec2::new(self.cfg.image.pos[0], self.cfg.image.pos[1]) * s,
                 Vec2::new(w_mm * s, h_mm * s),

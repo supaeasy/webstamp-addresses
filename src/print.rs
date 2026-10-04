@@ -234,7 +234,7 @@ unsafe fn draw_stamp(hdc: HDC, job: &Job, rot: u32, dpi_x: f32, map: &dyn Fn(f32
 unsafe fn draw_image(hdc: HDC, p: &Placed, rot: u32, mm_x: f32, mm_y: f32, map: &dyn Fn(f32, f32) -> (f32, f32)) {
     let (w_mm, h_mm) = (p.width_mm, p.height_mm());
     let (tw, th) = (((w_mm * mm_x).round() as u32).max(1), ((h_mm * mm_y).round() as u32).max(1));
-    let resized = image::imageops::resize(p.img, tw, th, image::imageops::FilterType::CatmullRom);
+    let resized = p.img.render(tw, th);
 
     let mut bgra = Vec::with_capacity(tw as usize * th as usize * 4);
     for px in resized.pixels() {
