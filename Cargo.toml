@@ -1,6 +1,6 @@
 [package]
 name = "webstamp-addresses"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Adds sender and recipient addresses to Swiss Post Webstamps (C5 envelopes) and prints them"
 
