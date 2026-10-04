@@ -8,13 +8,24 @@ use config::Config;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use stamp::{Block, PT_PER_MM, Raster, Template};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const PREVIEW_DPI: f32 = 150.0;
-const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
-const MUTED: Color32 = Color32::from_rgb(100, 116, 139);
-const BORDER: Color32 = Color32::from_rgb(226, 232, 240);
-const SIDEBAR_BG: Color32 = Color32::from_rgb(241, 245, 249);
-const DESK_BG: Color32 = Color32::from_rgb(203, 213, 225);
+const BUTTON_BLUE: Color32 = Color32::from_rgb(37, 99, 235);
+
+/// Aktuelles Farbschema (wird pro Frame aus dem System-Theme übernommen).
+static DARK: AtomicBool = AtomicBool::new(false);
+
+fn pick(light: (u8, u8, u8), dark: (u8, u8, u8)) -> Color32 {
+    let (r, g, b) = if DARK.load(Ordering::Relaxed) { dark } else { light };
+    Color32::from_rgb(r, g, b)
+}
+fn accent() -> Color32 { pick((37, 99, 235), (96, 165, 250)) }
+fn muted() -> Color32 { pick((100, 116, 139), (148, 163, 184)) }
+fn border() -> Color32 { pick((226, 232, 240), (51, 65, 85)) }
+fn sidebar_bg() -> Color32 { pick((241, 245, 249), (15, 23, 42)) }
+fn card_bg() -> Color32 { pick((255, 255, 255), (30, 41, 59)) }
+fn desk_bg() -> Color32 { pick((203, 213, 225), (51, 65, 85)) }
 const PLACEHOLDER: &str = "Max Mustermann\nMusterstraße 1\n12345 Musterstadt";
 
 fn main() -> eframe::Result {
@@ -47,12 +58,12 @@ struct App {
     loaded: Option<Loaded>,
     print_state: print::PrintState,
     status: String,
+    applied_dark: Option<bool>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(&cc.egui_ctx);
-        setup_style(&cc.egui_ctx);
         let cfg = Config::load();
         let mut app = Self {
             sender_text: cfg.sender.clone(),
@@ -61,6 +72,7 @@ impl App {
             recipient_text: String::new(),
             loaded: None,
             print_state: Default::default(),
+            applied_dark: None,
             status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
         };
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
@@ -169,7 +181,7 @@ impl App {
 
         // Kopfbereich
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("✉").size(26.0).color(ACCENT));
+            ui.label(egui::RichText::new("✉").size(26.0).color(accent()));
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("Webstamp Addresses").strong().size(17.0));
                 let name = self
@@ -178,7 +190,7 @@ impl App {
                     .and_then(|l| l.path.file_name())
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Keine Vorlage geladen".into());
-                ui.label(egui::RichText::new(name).small().color(MUTED));
+                ui.label(egui::RichText::new(name).small().color(muted()));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Öffnen…").clicked() {
@@ -220,7 +232,7 @@ impl App {
         });
 
         card(ui, "Positionen", |ui| {
-            ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(MUTED));
+            ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(muted()));
             egui::Grid::new("pos").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("Empfänger");
                 pos_drag(ui, &mut self.cfg.recipient_pos);
@@ -256,13 +268,13 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.cfg.print_offset[0]).speed(0.1).prefix("x ").suffix(" mm"));
                 ui.add(egui::DragValue::new(&mut self.cfg.print_offset[1]).speed(0.1).prefix("y ").suffix(" mm"));
             });
-            ui.label(egui::RichText::new("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.").small().color(MUTED));
+            ui.label(egui::RichText::new("Im Druckdialog unter „Eigenschaften“ Papierformat C5 wählen.").small().color(muted()));
         });
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let print_btn = egui::Button::new(egui::RichText::new("Drucken…").strong().color(Color32::WHITE))
-                .fill(ACCENT)
+                .fill(BUTTON_BLUE)
                 .min_size(Vec2::new(140.0, 36.0));
             if ui.add_enabled(have, print_btn).clicked() {
                 self.do_print();
@@ -279,7 +291,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("Webstamp-PDF hierher ziehen\noder links „Öffnen…“ wählen")
                         .size(18.0)
-                        .color(MUTED),
+                        .color(muted()),
                 )
             });
             return;
@@ -380,37 +392,37 @@ impl App {
 
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(card_bg())
+        .stroke(Stroke::new(1.0, border()))
         .corner_radius(10)
         .inner_margin(12)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(title).strong().size(14.0).color(ACCENT));
+            ui.label(egui::RichText::new(title).strong().size(14.0).color(accent()));
             ui.add_space(2.0);
             add(ui);
         });
     ui.add_space(4.0);
 }
 
-fn setup_style(ctx: &egui::Context) {
-    ctx.set_visuals(egui::Visuals::light());
+fn setup_style(ctx: &egui::Context, dark: bool) {
+    ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
     ctx.global_style_mut(|style| {
         style.spacing.item_spacing = Vec2::new(8.0, 7.0);
         style.spacing.button_padding = Vec2::new(12.0, 6.0);
         style.spacing.interact_size.y = 26.0;
         let v = &mut style.visuals;
-        v.selection.bg_fill = ACCENT;
-        v.hyperlink_color = ACCENT;
-        v.extreme_bg_color = Color32::from_rgb(248, 250, 252);
+        v.selection.bg_fill = BUTTON_BLUE;
+        v.hyperlink_color = accent();
+        v.extreme_bg_color = if dark { Color32::from_rgb(15, 23, 42) } else { Color32::from_rgb(248, 250, 252) };
         let r = egui::CornerRadius::same(7);
         v.widgets.noninteractive.corner_radius = r;
         v.widgets.inactive.corner_radius = r;
         v.widgets.hovered.corner_radius = r;
         v.widgets.active.corner_radius = r;
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(241, 245, 249);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 232, 240);
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+        v.widgets.inactive.weak_bg_fill = if dark { Color32::from_rgb(51, 65, 85) } else { Color32::from_rgb(241, 245, 249) };
+        v.widgets.hovered.weak_bg_fill = if dark { Color32::from_rgb(71, 85, 105) } else { Color32::from_rgb(226, 232, 240) };
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, border());
         for (ts, size) in [
             (egui::TextStyle::Body, 14.0),
             (egui::TextStyle::Button, 14.0),
@@ -448,6 +460,12 @@ fn setup_fonts(ctx: &egui::Context) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let dark = ui.visuals().dark_mode;
+        DARK.store(dark, Ordering::Relaxed);
+        if self.applied_dark != Some(dark) {
+            setup_style(&ctx, dark);
+            self.applied_dark = Some(dark);
+        }
         if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().next().map(|f| f.path().to_path_buf())) {
             self.load_template(&ctx, &path);
         }
@@ -455,21 +473,21 @@ impl eframe::App for App {
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .fill(card_bg())
+                    .stroke(Stroke::new(1.0, border()))
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(&self.status).small().color(MUTED));
+                ui.label(egui::RichText::new(&self.status).small().color(muted()));
             });
         egui::Panel::left("controls")
             .min_size(340.0)
-            .frame(egui::Frame::new().fill(SIDEBAR_BG).inner_margin(12))
+            .frame(egui::Frame::new().fill(sidebar_bg()).inner_margin(12))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
             });
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(DESK_BG))
+            .frame(egui::Frame::new().fill(desk_bg()))
             .show(ui, |ui| self.preview(ui));
 
         // Einstellungen automatisch sichern, sobald sich etwas geändert hat.
