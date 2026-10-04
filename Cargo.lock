@@ -1150,22 +1150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "envelope-printer"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "eframe",
- "hayro",
- "image",
- "lopdf",
- "rfd",
- "serde",
- "serde_json",
- "windows",
- "winresource",
-]
-
-[[package]]
 name = "epaint"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4159,6 +4143,22 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
+]
+
+[[package]]
+name = "webstamp-addresses"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "hayro",
+ "image",
+ "lopdf",
+ "rfd",
+ "serde",
+ "serde_json",
+ "windows",
+ "winresource",
 ]
 
 [[package]]

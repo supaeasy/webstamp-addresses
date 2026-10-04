@@ -46,12 +46,19 @@ impl Default for Config {
 }
 
 fn path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("webstamp-addresses").join("config.json"))
+}
+
+/// Einstellungen aus der früheren Version (Projektname „envelope-printer“).
+fn legacy_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("envelope-printer").join("config.json"))
 }
 
 impl Config {
     pub fn load() -> Self {
         path()
+            .filter(|p| p.exists())
+            .or_else(legacy_path)
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()

@@ -21,7 +21,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Umschlag-Druck",
+        "Webstamp Addresses",
         opts,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
