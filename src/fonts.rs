@@ -59,6 +59,11 @@ impl SystemFonts {
         self.allowed.iter().map(String::as_str).find(|f| f.eq_ignore_ascii_case(name.trim()))
     }
 
+    /// Standardschrift: Helvetica, falls installiert, sonst Arial, sonst die erste erlaubte Schrift.
+    pub fn default_font(&self) -> Option<&str> {
+        ["Helvetica", "Arial"].into_iter().find_map(|n| self.canonical_allowed(n)).or_else(|| self.allowed.first().map(String::as_str))
+    }
+
     fn query(&self, family: &str) -> Option<fontdb::ID> {
         self.db.query(&Query { families: &[Family::Name(family)], weight: Weight::NORMAL, ..Default::default() })
     }
@@ -144,6 +149,14 @@ mod tests {
         for no in ["Times New Roman", "Arial Black", "Arial Narrow", "Arial Rounded MT Bold", "Consolas", "Comic Sans MS", "Segoe Script", "Helvetica Neue Condensed"] {
             assert!(!is_allowed_family(no), "{no}");
         }
+    }
+
+    #[test]
+    fn default_font_prefers_helvetica_then_arial() {
+        let sf = SystemFonts::load();
+        let Some(d) = sf.default_font() else { return };
+        let expected = if sf.canonical_allowed("Helvetica").is_some() { "Helvetica" } else if sf.canonical_allowed("Arial").is_some() { "Arial" } else { sf.allowed[0].as_str() };
+        assert_eq!(d, expected);
     }
 
     #[test]

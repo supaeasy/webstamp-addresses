@@ -10,6 +10,8 @@ pub const MAX_SIZE_PT: f32 = 28.0;
 pub const IDEAL_SIZE_PT: f32 = 10.0;
 pub const MIN_GAP_MM: f32 = 1.0;
 pub const MAX_GAP_MM: f32 = 1.5;
+/// Standardschrift; ist sie nicht installiert, gilt Arial (siehe `SystemFonts::default_font`).
+pub const DEFAULT_FONT: &str = "Helvetica";
 pub const MIN_LINES: usize = 3;
 pub const MAX_LINES: usize = 6;
 
@@ -28,11 +30,11 @@ pub struct BlockCfg {
 
 impl BlockCfg {
     pub fn recipient() -> Self {
-        Self { pos: [105.0, 85.0], size_pt: IDEAL_SIZE_PT, line_gap_mm: 1.25, font: "Arial".into() }
+        Self { pos: [155.0, 108.0], size_pt: IDEAL_SIZE_PT, line_gap_mm: 1.25, font: DEFAULT_FONT.into() }
     }
 
     pub fn sender() -> Self {
-        Self { pos: [12.0, 12.0], size_pt: MIN_SIZE_PT, line_gap_mm: 1.25, font: "Arial".into() }
+        Self { pos: [12.0, 25.2], size_pt: MIN_SIZE_PT, line_gap_mm: 1.25, font: DEFAULT_FONT.into() }
     }
 
     /// Bringt Werte aus einer älteren oder von Hand bearbeiteten Konfiguration in den erlaubten Bereich.
@@ -144,5 +146,32 @@ impl Config {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(p, serde_json::to_string_pretty(self).unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_positions_and_font() {
+        let c = Config::default();
+        assert_eq!(c.recipient.pos, [155.0, 108.0]);
+        assert_eq!(c.sender_block.pos, [12.0, 25.2]);
+        assert_eq!((c.recipient.font.as_str(), c.sender_block.font.as_str()), ("Helvetica", "Helvetica"));
+        // „Positionen zurücksetzen“ nutzt dieselben Werte
+        assert_eq!(BlockCfg::recipient().pos, c.recipient.pos);
+        assert_eq!(BlockCfg::sender().pos, c.sender_block.pos);
+    }
+
+    #[test]
+    fn old_values_are_clamped() {
+        let mut b = BlockCfg { size_pt: 5.0, line_gap_mm: 3.0, ..BlockCfg::sender() };
+        b.clamp();
+        assert_eq!((b.size_pt, b.line_gap_mm), (config_min(), MAX_GAP_MM));
+    }
+
+    fn config_min() -> f32 {
+        MIN_SIZE_PT
     }
 }

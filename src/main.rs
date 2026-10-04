@@ -874,11 +874,11 @@ impl eframe::App for App {
         if let Some(rx) = &self.fonts_rx {
             if let Ok(sf) = rx.try_recv() {
                 for (cfg, picker) in [&mut self.cfg.recipient, &mut self.cfg.sender_block].into_iter().zip(&mut self.pickers) {
-                    // Nur erlaubte Grotesk-Schriften; sonst die erste installierte erlaubte (meist Arial).
+                    // Nur erlaubte Grotesk-Schriften; sonst die Standardschrift (Helvetica, falls installiert, sonst Arial).
                     if let Some(name) = sf
                         .canonical_allowed(&cfg.font)
                         .map(str::to_owned)
-                        .or_else(|| sf.allowed.first().cloned())
+                        .or_else(|| sf.default_font().map(str::to_owned))
                     {
                         cfg.font = name;
                     }
