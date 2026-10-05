@@ -70,6 +70,29 @@ pub struct Template {
     pub height_mm: f32,
 }
 
+/// Standardformat des Umschlags (C5, quer), solange keine Webstamp-PDF geladen ist.
+pub const C5_MM: (f32, f32) = (229.0, 162.0);
+
+/// Leere Seite in Umschlaggröße – Vorlage, wenn ohne Webstamp gedruckt wird.
+pub fn blank_template(width_mm: f32, height_mm: f32) -> Template {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), (width_mm * PT_PER_MM).into(), (height_mm * PT_PER_MM).into()],
+        "Resources" => dictionary! {},
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog);
+    let mut bytes = vec![];
+    doc.save_to(&mut bytes).expect("leeres PDF");
+    Template { bytes, width_mm, height_mm }
+}
+
 pub struct Raster {
     pub w: usize,
     pub h: usize,
@@ -426,23 +449,18 @@ mod tests {
         assert!((runs[2].baseline_mm - runs[1].baseline_mm - 4.75).abs() < 1e-4);
     }
 
-    fn blank_template() -> Template {
-        let mut doc = Document::with_version("1.5");
-        let pages_id = doc.new_object_id();
-        let page_id = doc.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), 649.into(), 459.into()],
-            "Resources" => dictionary! {},
-        });
-        doc.objects.insert(
-            pages_id,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }.into(),
-        );
-        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-        doc.trailer.set("Root", catalog);
-        let mut bytes = vec![];
-        doc.save_to(&mut bytes).unwrap();
-        Template { bytes, width_mm: 229.0, height_mm: 162.0 }
+    fn blank() -> Template {
+        blank_template(229.0, 162.0)
+    }
+
+    #[test]
+    fn blank_template_has_requested_size() {
+        let t = blank_template(100.0, 50.0);
+        let doc = Document::load_mem(&t.bytes).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let mb = doc.get_dictionary(page).unwrap().get(b"MediaBox").unwrap().as_array().unwrap().clone();
+        let w = mb[2].as_float().unwrap();
+        assert!((w - 100.0 * PT_PER_MM).abs() < 0.01);
     }
 
     #[test]
@@ -452,7 +470,7 @@ mod tests {
         let mut b = block("Ärger GmbH\nMüllerstraße 5\n12345 Köln");
         b.font = family;
         let out = std::env::temp_dir().join("env_embed_test.pdf");
-        let missing = export_pdf(&blank_template(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
+        let missing = export_pdf(&blank(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
         assert!(missing.is_empty(), "{missing:?}");
 
         // Die Teilschrift ist eingebettet und deutlich kleiner als die ganze Schrift.
@@ -487,14 +505,14 @@ mod tests {
             pitch_mm: (up + down) * em_mm + gap,
         };
         let out = std::env::temp_dir().join("env_gap.pdf");
-        export_pdf(&blank_template(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
+        export_pdf(&blank(), &[b], &[], &out, &|f| sf.font_data(f)).unwrap();
         println!("{family}: up {up:.3} down {down:.3} em, Soll-Abstand {gap} mm → {}", out.display());
     }
 
     #[test]
     fn export_falls_back_to_helvetica() {
         let out = std::env::temp_dir().join("env_fallback_test.pdf");
-        let missing = export_pdf(&blank_template(), &[block("Ärger\nKöln")], &[], &out, &|_| None).unwrap();
+        let missing = export_pdf(&blank(), &[block("Ärger\nKöln")], &[], &out, &|_| None).unwrap();
         assert_eq!(missing, vec!["Arial".to_string()]);
     }
 

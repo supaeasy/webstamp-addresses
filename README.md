@@ -16,6 +16,8 @@ Die Anwendung nimmt die heruntergeladene Webstamp-PDF als Vorlage, lässt den St
 ### Funktionen
 
 - **Webstamp-PDF als Vorlage:** per Drag & Drop, über „Stempel-PDF öffnen…“ oder als Startargument. Die zuletzt benutzte Vorlage wird beim nächsten Start wieder geladen.
+- **Vorlagen-Slots:** beliebig viele Vorlagen (Neu, Kopie, Löschen, Umbenennen). Jede speichert Empfänger- und Absenderadresse, Schrift, Größe und Zeilenabstand, Positionen, das eingefügte Bild, Inland/Ausland und die Einstellung „Webstamp mitdrucken“ – **nicht** den verwendeten Webstamp. Alles wird automatisch gesichert; Einstellungen aus älteren Versionen werden als erste Vorlage übernommen.
+- **Ohne Webstamp drucken:** „Webstamp mitdrucken“ ausschalten blendet die Marke aus (Vorschau, Druck und PDF). Dann ist auch keine Webstamp-PDF nötig; der Umschlag hat dann das Format C5.
 - **Empfänger- und Absenderadresse** (mehrzeilig).
 - **Standard-Absender:** einmal speichern („Als Standard speichern“), danach immer vorbelegt. Der Absender lässt sich pro Umschlag abschalten.
 - **Frei verschiebbare Adressblöcke:** per Maus in der Vorschau ziehen oder die Position in mm eingeben. Die Positionen werden gespeichert.
@@ -86,6 +88,8 @@ The app takes the downloaded Webstamp PDF as a template, leaves the stamp (inclu
 ### Features
 
 - **Webstamp PDF as template:** drag & drop, “Stempel-PDF öffnen…” (open), or pass it as a command-line argument. The last used template is reloaded on startup.
+- **Template slots:** any number of templates (new, copy, delete, rename). Each one stores recipient and sender address, font, size and line spacing, positions, the inserted image, domestic/international and the “print Webstamp” setting – **not** the Webstamp in use. Everything is saved automatically; settings from older versions become the first template.
+- **Print without a Webstamp:** switching “Webstamp mitdrucken” off hides the stamp (preview, print and PDF). No Webstamp PDF is needed then; the envelope uses the C5 format.
 - **Recipient and sender address** (multi-line).
 - **Default sender:** save it once (“Als Standard speichern”) and it is pre-filled from then on. The sender can be switched off per envelope.
 - **Freely movable address blocks:** drag them in the preview or enter the position in mm. Positions are persisted.

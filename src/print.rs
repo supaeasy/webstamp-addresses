@@ -19,7 +19,8 @@ pub struct Job<'a> {
     pub name: &'a str,
     pub env_w_mm: f32,
     pub env_h_mm: f32,
-    pub stamp: &'a Raster,
+    /// Der Webstamp (Raster); `None` = ohne Webstamp drucken.
+    pub stamp: Option<&'a Raster>,
     pub stamp_dpi: f32,
     pub blocks: &'a [Block],
     pub images: &'a [Placed<'a>],
@@ -164,7 +165,7 @@ unsafe fn draw(hdc: HDC, job: &Job) -> Result<(), String> {
 
 /// Zeichnet nur den nicht-weißen Bereich des Stempels (klein, schnell zu spoolen).
 unsafe fn draw_stamp(hdc: HDC, job: &Job, rot: u32, dpi_x: f32, map: &dyn Fn(f32, f32) -> (f32, f32)) {
-    let r = job.stamp;
+    let Some(r) = job.stamp else { return };
     let Some((x0, y0, x1, y1)) = bbox(r) else { return };
     let (w, h) = (x1 - x0, y1 - y0);
     // BGRA, top-down

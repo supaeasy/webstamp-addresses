@@ -7,10 +7,10 @@ mod graphic;
 mod print;
 mod stamp;
 
-use config::{BlockCfg, Config, Destination};
+use config::{BlockCfg, Config, Destination, Slot};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use graphic::Graphic;
-use stamp::{Block, PT_PER_MM, Placed, Raster, Template};
+use stamp::{Block, PT_PER_MM, Placed, Template};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -53,8 +53,6 @@ fn main() -> eframe::Result {
 struct Loaded {
     path: PathBuf,
     template: Template,
-    #[cfg_attr(not(windows), allow(dead_code))] // nur der Windows-Druck braucht das Raster
-    raster: Raster,
     texture: egui::TextureHandle,
 }
 
@@ -79,11 +77,33 @@ struct FontPicker {
     open: bool,
 }
 
+/// Aktionen der Vorlagen-Verwaltung.
+#[derive(Clone, Copy)]
+enum SlotAction {
+    Select(usize),
+    New,
+    Copy,
+    Delete,
+}
+
+/// Setzt Schriften, die nicht installiert oder nicht erlaubt sind, auf die Standardschrift.
+fn normalize_fonts(sf: &fonts::SystemFonts, slot: &mut Slot) {
+    for cfg in [&mut slot.recipient, &mut slot.sender_block] {
+        if let Some(name) = sf
+            .canonical_allowed(&cfg.font)
+            .map(str::to_owned)
+            .or_else(|| sf.default_font().map(str::to_owned))
+        {
+            cfg.font = name;
+        }
+    }
+}
+
 struct App {
     cfg: Config,
     saved_json: String,
-    sender_text: String,
-    recipient_text: String,
+    /// Löschen der Vorlage wurde einmal angeklickt und wartet auf Bestätigung.
+    confirm_delete: bool,
     loaded: Option<Loaded>,
     image: Option<LoadedImage>,
     #[cfg(windows)]
@@ -113,10 +133,9 @@ impl App {
             ctx.request_repaint();
         });
         let mut app = Self {
-            sender_text: cfg.sender.clone(),
             saved_json: serde_json::to_string(&cfg).unwrap(),
             cfg,
-            recipient_text: String::new(),
+            confirm_delete: false,
             loaded: None,
             image: None,
             #[cfg(windows)]
@@ -129,11 +148,9 @@ impl App {
             fonts_rx: Some(rx),
             pickers: Default::default(),
             fonts_dirty: false,
-            status: "Stempel-PDF per Drag & Drop oder über „Öffnen“ laden.".into(),
+            status: "Webstamp-PDF per Drag & Drop oder über „Öffnen“ laden – oder ohne Webstamp drucken.".into(),
         };
-        if let Some(p) = app.cfg.image.path.clone() {
-            app.load_image(&cc.egui_ctx, &p);
-        }
+        app.reload_image(&cc.egui_ctx);
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
         if let Some(p) = arg.or_else(|| app.cfg.last_template.clone()) {
             if p.exists() {
@@ -159,7 +176,7 @@ impl App {
                     template.height_mm
                 );
                 self.cfg.last_template = Some(path.to_path_buf());
-                self.loaded = Some(Loaded { path: path.to_path_buf(), template, raster, texture });
+                self.loaded = Some(Loaded { path: path.to_path_buf(), template, texture });
             }
             Err(e) => self.status = format!("Fehler: {e}"),
         }
@@ -175,7 +192,7 @@ impl App {
                     tex.as_raw(),
                 );
                 let texture = ctx.load_texture("image", color, egui::TextureOptions::LINEAR);
-                self.cfg.image.path = Some(path.to_path_buf());
+                self.cfg.slot_mut().image.path = Some(path.to_path_buf());
                 self.status = format!(
                     "Grafik geladen: {} ({})",
                     path.file_name().unwrap_or_default().to_string_lossy(),
@@ -187,6 +204,76 @@ impl App {
                 self.image = None;
                 self.status = format!("Bild nicht lesbar: {e}");
             }
+        }
+    }
+
+    /// Lädt das Bild der aktiven Vorlage (oder entfernt es, wenn die Vorlage keins hat).
+    fn reload_image(&mut self, ctx: &egui::Context) {
+        self.image = None;
+        if let Some(p) = self.cfg.slot().image.path.clone() {
+            self.load_image(ctx, &p);
+        }
+    }
+
+    /// Umschlaggröße: aus der geladenen Webstamp-PDF, sonst C5.
+    fn env_size(&self) -> (f32, f32) {
+        self.loaded
+            .as_ref()
+            .map_or(stamp::C5_MM, |l| (l.template.width_mm, l.template.height_mm))
+    }
+
+    /// Mit Webstamp drucken braucht eine geladene PDF; ohne Webstamp geht es immer.
+    fn can_print(&self) -> bool {
+        self.loaded.is_some() || !self.cfg.slot().print_stamp
+    }
+
+    /// Nach einem Wechsel der Vorlage: Bild, Schriften und Eingabefelder neu aufbauen.
+    fn after_slot_change(&mut self, ctx: &egui::Context) {
+        if let Some(sf) = &self.system_fonts {
+            normalize_fonts(sf, &mut self.cfg.slots[self.cfg.active]);
+        }
+        self.reload_image(ctx);
+        self.fonts_dirty = true;
+        for p in &mut self.pickers {
+            p.query.clear();
+            p.open = false;
+        }
+    }
+
+    fn apply_slot_action(&mut self, ctx: &egui::Context, action: SlotAction) {
+        let was_delete = matches!(action, SlotAction::Delete);
+        match action {
+            SlotAction::Select(i) if i < self.cfg.slots.len() => {
+                self.cfg.active = i;
+                self.after_slot_change(ctx);
+            }
+            SlotAction::Select(_) => {}
+            SlotAction::New => {
+                let name = format!("Vorlage {}", self.cfg.slots.len() + 1);
+                self.cfg.slots.push(Slot::named(name));
+                self.cfg.active = self.cfg.slots.len() - 1;
+                self.after_slot_change(ctx);
+            }
+            SlotAction::Copy => {
+                let mut copy = self.cfg.slot().clone();
+                copy.name = format!("{} (Kopie)", copy.name);
+                self.cfg.slots.push(copy);
+                self.cfg.active = self.cfg.slots.len() - 1;
+                self.after_slot_change(ctx);
+            }
+            SlotAction::Delete => {
+                if self.confirm_delete && self.cfg.slots.len() > 1 {
+                    self.cfg.slots.remove(self.cfg.active);
+                    self.cfg.active = self.cfg.active.min(self.cfg.slots.len() - 1);
+                    self.after_slot_change(ctx);
+                    self.confirm_delete = false;
+                } else {
+                    self.confirm_delete = true;
+                }
+            }
+        }
+        if !was_delete {
+            self.confirm_delete = false;
         }
     }
 
@@ -208,7 +295,8 @@ impl App {
     /// Adressblock mit Zeilenabstand aus den Schriftmetriken: Abstand zwischen den Unterlängen der
     /// oberen und den Oberlängen der unteren Zeile = `line_gap_mm` (Vorgabe der Post: 1 bis 1,5 mm).
     fn block(&self, idx: usize, text: &str) -> Block {
-        let c = if idx == 0 { &self.cfg.recipient } else { &self.cfg.sender_block };
+        let slot = self.cfg.slot();
+        let c = if idx == 0 { &slot.recipient } else { &slot.sender_block };
         let (up, down) = self
             .system_fonts
             .as_ref()
@@ -227,12 +315,13 @@ impl App {
 
     /// Die zu druckenden Blöcke (leere werden ausgelassen).
     fn blocks(&self) -> Vec<Block> {
+        let slot = self.cfg.slot();
         let mut v = vec![];
-        if self.cfg.print_sender && !self.sender_text.trim().is_empty() {
-            v.push(self.block(1, &self.sender_text));
+        if slot.print_sender && !slot.sender_text.trim().is_empty() {
+            v.push(self.block(1, &slot.sender_text));
         }
-        if !self.recipient_text.trim().is_empty() {
-            v.push(self.block(0, &self.recipient_text));
+        if !slot.recipient_text.trim().is_empty() {
+            v.push(self.block(0, &slot.recipient_text));
         }
         v
     }
@@ -240,7 +329,7 @@ impl App {
     /// macOS/Linux: PDF erzeugen und über CUPS (`lp`) an den Standarddrucker senden.
     #[cfg(not(windows))]
     fn do_print(&mut self) {
-        if self.loaded.is_none() {
+        if !self.can_print() {
             return;
         }
         let tmp = std::env::temp_dir().join("webstamp-addresses-print.pdf");
@@ -264,40 +353,52 @@ impl App {
 
     #[cfg(windows)]
     fn do_print(&mut self) {
-        let Some(l) = &self.loaded else { return };
+        if !self.can_print() {
+            return;
+        }
+        let (env_w_mm, env_h_mm) = self.env_size();
+        let use_stamp = self.cfg.slot().print_stamp;
+        // Für den Druck den Webstamp in höherer Auflösung rendern (entfällt ohne Webstamp).
+        let rendered = match self.loaded.as_ref().filter(|_| use_stamp) {
+            Some(l) => stamp::render_template(&l.template, 600.0).map(Some),
+            None => Ok(None),
+        };
+        let hi = match rendered {
+            Ok(h) => h,
+            Err(e) => {
+                self.status = format!("Fehler beim Rendern: {e}");
+                return;
+            }
+        };
         let blocks = self.blocks();
-        let images = placed(&self.image, &self.cfg.image);
+        let images = placed(&self.image, &self.cfg.slot().image);
         let job = print::Job {
             images: &images,
             name: "Umschlag",
-            env_w_mm: l.template.width_mm,
-            env_h_mm: l.template.height_mm,
-            stamp: &l.raster,
-            stamp_dpi: PREVIEW_DPI,
+            env_w_mm,
+            env_h_mm,
+            stamp: hi.as_ref(),
+            stamp_dpi: 600.0,
             blocks: &blocks,
             flip_180: self.cfg.flip_180,
             offset_mm: self.cfg.print_offset,
         };
-        // Für den Druck den Stempel in höherer Auflösung rendern.
-        let hi = stamp::render_template(&l.template, 600.0);
-        self.status = match hi {
-            Ok(hi) => {
-                let job = print::Job { stamp: &hi, stamp_dpi: 600.0, ..job };
-                match print::print(&mut self.print_state, &job) {
-                    Ok(true) => "An den Drucker gesendet.".into(),
-                    Ok(false) => "Druck abgebrochen.".into(),
-                    Err(e) => format!("Druckfehler: {e}"),
-                }
-            }
-            Err(e) => format!("Fehler beim Rendern: {e}"),
+        self.status = match print::print(&mut self.print_state, &job) {
+            Ok(true) => "An den Drucker gesendet.".into(),
+            Ok(false) => "Druck abgebrochen.".into(),
+            Err(e) => format!("Druckfehler: {e}"),
         };
     }
 
     fn save_pdf(&mut self) {
-        let Some(l) = &self.loaded else { return };
-        let default = l
-            .path
-            .file_stem()
+        if !self.can_print() {
+            return;
+        }
+        let default = self
+            .loaded
+            .as_ref()
+            .filter(|_| self.cfg.slot().print_stamp)
+            .and_then(|l| l.path.file_stem())
             .map(|s| format!("{}_umschlag.pdf", s.to_string_lossy()))
             .unwrap_or_else(|| "umschlag.pdf".into());
         if let Some(out) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(default).save_file() {
@@ -311,24 +412,37 @@ impl App {
     /// Schreibt Vorlage + Adressen + Bild als PDF.
     /// Rückgabe: Schriften, die nicht eingebettet werden konnten (dafür gilt Helvetica).
     fn write_pdf(&self, out: &Path) -> Result<Vec<String>, String> {
-        let l = self.loaded.as_ref().ok_or("Keine Vorlage geladen")?;
+        if !self.can_print() {
+            return Err("Keine Webstamp-PDF geladen".into());
+        }
+        // Ohne Webstamp: leere Seite in Umschlaggröße statt der Webstamp-PDF.
+        let (ew, eh) = self.env_size();
+        let blank;
+        let template = match self.loaded.as_ref().filter(|_| self.cfg.slot().print_stamp) {
+            Some(l) => &l.template,
+            None => {
+                blank = stamp::blank_template(ew, eh);
+                &blank
+            }
+        };
         let sf = self.system_fonts.as_ref();
         let face = |family: &str| sf.and_then(|s| s.font_data(family));
-        let images = placed(&self.image, &self.cfg.image);
-        stamp::export_pdf(&l.template, &self.blocks(), &images, out, &face)
+        let images = placed(&self.image, &self.cfg.slot().image);
+        stamp::export_pdf(template, &self.blocks(), &images, out, &face)
     }
 
     /// Eingaben und Einstellungen eines Adressblocks (0 = Empfänger, 1 = Absender).
     fn block_controls(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let (text, cfg) = if idx == 0 {
-            (&mut self.recipient_text, &mut self.cfg.recipient)
-        } else {
-            (&mut self.sender_text, &mut self.cfg.sender_block)
-        };
-        let enabled = idx == 0 || self.cfg.print_sender;
+        let slot = self.cfg.slot_mut();
+        let enabled = idx == 0 || slot.print_sender;
         if idx == 1 {
-            ui.checkbox(&mut self.cfg.print_sender, "Absender drucken");
+            ui.checkbox(&mut slot.print_sender, "Absender drucken");
         }
+        let (text, cfg) = if idx == 0 {
+            (&mut slot.recipient_text, &mut slot.recipient)
+        } else {
+            (&mut slot.sender_text, &mut slot.sender_block)
+        };
 
         let (id, rows, hint) = if idx == 0 {
             ("recipient_text", 4, "Name\nStraße Nr.\nPLZ Ort")
@@ -399,18 +513,6 @@ impl App {
                 .small()
                 .color(muted()),
         );
-
-        if idx == 1 {
-            ui.horizontal(|ui| {
-                let is_default = self.sender_text == self.cfg.sender;
-                if ui.add_enabled(!is_default, egui::Button::new("Als Standard speichern")).clicked() {
-                    self.cfg.sender = self.sender_text.clone();
-                }
-                if ui.add_enabled(!is_default, egui::Button::new("Standard laden")).clicked() {
-                    self.sender_text = self.cfg.sender.clone();
-                }
-            });
-        }
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -426,7 +528,7 @@ impl App {
                     .as_ref()
                     .and_then(|l| l.path.file_name())
                     .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Keine Vorlage geladen".into());
+                    .unwrap_or_else(|| "Kein Webstamp geladen".into());
                 ui.label(egui::RichText::new(name).small().color(muted()));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -436,6 +538,60 @@ impl App {
             });
         });
         ui.add_space(4.0);
+
+        let mut action: Option<SlotAction> = None;
+        card(ui, "Vorlage", |ui| {
+            let names: Vec<String> = self.cfg.slots.iter().map(|s| s.name.clone()).collect();
+            let active = self.cfg.active;
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("slot_select")
+                    .width(170.0)
+                    .selected_text(names[active].clone())
+                    .show_ui(ui, |ui| {
+                        for (i, n) in names.iter().enumerate() {
+                            if ui.selectable_label(i == active, n).clicked() {
+                                action = Some(SlotAction::Select(i));
+                            }
+                        }
+                    });
+                if ui.button("Neu").on_hover_text("Leere Vorlage anlegen").clicked() {
+                    action = Some(SlotAction::New);
+                }
+                if ui.button("Kopie").on_hover_text("Aktuelle Vorlage duplizieren").clicked() {
+                    action = Some(SlotAction::Copy);
+                }
+                let del = if self.confirm_delete { "Wirklich?" } else { "Löschen" };
+                if ui.add_enabled(names.len() > 1, egui::Button::new(del)).clicked() {
+                    action = Some(SlotAction::Delete);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut self.cfg.slot_mut().name).desired_width(200.0));
+            });
+            ui.label(
+                egui::RichText::new("Speichert Adressen, Schrift, Größen, Positionen und Bild – nicht den Webstamp.")
+                    .small()
+                    .color(muted()),
+            );
+        });
+        if let Some(a) = action {
+            self.apply_slot_action(&ctx, a);
+        }
+
+        card(ui, "Webstamp", |ui| {
+            let slot = self.cfg.slot_mut();
+            ui.checkbox(&mut slot.print_stamp, "Webstamp mitdrucken");
+            let note = if !slot.print_stamp {
+                "Marke ausgeblendet: Es wird ohne Webstamp gedruckt (C5, wenn keine PDF geladen ist).".to_string()
+            } else {
+                match &self.loaded {
+                    Some(_) => "Der geladene Webstamp wird mitgedruckt.".into(),
+                    None => "Noch kein Webstamp geladen – PDF öffnen oder hineinziehen.".into(),
+                }
+            };
+            ui.label(egui::RichText::new(note).small().color(muted()));
+        });
 
         card(ui, "Empfänger", |ui| self.block_controls(ui, 0));
         card(ui, "Absender", |ui| self.block_controls(ui, 1));
@@ -447,11 +603,12 @@ impl App {
                 }
                 if ui.add_enabled(self.image.is_some(), egui::Button::new("Entfernen")).clicked() {
                     self.image = None;
-                    self.cfg.image.path = None;
+                    self.cfg.slot_mut().image.path = None;
                 }
             });
             let name = self
                 .cfg
+                .slot()
                 .image
                 .path
                 .as_ref()
@@ -461,9 +618,9 @@ impl App {
             ui.label(egui::RichText::new(name).small().color(muted()));
             ui.add_enabled_ui(self.image.is_some(), |ui| {
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.cfg.image.show, "Drucken");
+                    ui.checkbox(&mut self.cfg.slot_mut().image.show, "Drucken");
                     ui.label("Breite");
-                    ui.add(egui::DragValue::new(&mut self.cfg.image.width_mm).speed(0.5).range(5.0..=200.0).suffix(" mm"));
+                    ui.add(egui::DragValue::new(&mut self.cfg.slot_mut().image.width_mm).speed(0.5).range(5.0..=200.0).suffix(" mm"));
                 });
             });
         });
@@ -472,14 +629,14 @@ impl App {
             ui.label(egui::RichText::new("Blöcke lassen sich auch in der Vorschau ziehen.").small().color(muted()));
             egui::Grid::new("pos").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("Empfänger");
-                pos_drag(ui, &mut self.cfg.recipient.pos);
+                pos_drag(ui, &mut self.cfg.slot_mut().recipient.pos);
                 ui.end_row();
                 ui.label("Absender");
-                pos_drag(ui, &mut self.cfg.sender_block.pos);
+                pos_drag(ui, &mut self.cfg.slot_mut().sender_block.pos);
                 ui.end_row();
                 if self.image.is_some() {
                     ui.label("Bild");
-                    pos_drag(ui, &mut self.cfg.image.pos);
+                    pos_drag(ui, &mut self.cfg.slot_mut().image.pos);
                     ui.end_row();
                 }
             });
@@ -494,8 +651,8 @@ impl App {
                 });
             }
             if ui.button("Positionen zurücksetzen").clicked() {
-                self.cfg.recipient.pos = BlockCfg::recipient().pos;
-                self.cfg.sender_block.pos = BlockCfg::sender().pos;
+                self.cfg.slot_mut().recipient.pos = BlockCfg::recipient().pos;
+                self.cfg.slot_mut().sender_block.pos = BlockCfg::sender().pos;
             }
         });
 
@@ -520,17 +677,12 @@ impl App {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
-        let Some(l) = &self.loaded else {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("Webstamp-PDF hierher ziehen\noder links „Öffnen…“ wählen")
-                        .size(18.0)
-                        .color(muted()),
-                )
-            });
-            return;
-        };
-        let (ew, eh) = (l.template.width_mm, l.template.height_mm);
+        let (ew, eh) = self.env_size();
+        let stamp_tex = self
+            .loaded
+            .as_ref()
+            .filter(|_| self.cfg.slot().print_stamp)
+            .map(|l| l.texture.id());
         let avail = ui.available_rect_before_wrap().shrink(12.0);
         let s = (avail.width() / ew).min(avail.height() / eh); // px pro mm
         let env = Rect::from_center_size(avail.center(), Vec2::new(ew * s, eh * s));
@@ -539,12 +691,18 @@ impl App {
         for (grow, a) in [(10.0, 10u8), (6.0, 14), (3.0, 20)] {
             painter.rect_filled(env.expand(grow).translate(Vec2::new(0.0, 4.0)), 6.0, Color32::from_black_alpha(a));
         }
-        painter.image(
-            l.texture.id(),
-            env,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        match stamp_tex {
+            Some(id) => {
+                painter.image(id, env, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                painter.rect_filled(env, 0.0, Color32::WHITE);
+                if self.loaded.is_none() && self.cfg.slot().print_stamp {
+                    let at = env.min + Vec2::new(ew - 37.0, 19.0) * s;
+                    painter.text(at, Align2::CENTER_CENTER, "Webstamp-PDF\nhierher ziehen", FontId::proportional(13.0), Color32::from_gray(150));
+                }
+            }
+        }
         painter.rect_stroke(env, 0.0, Stroke::new(1.0, Color32::GRAY), egui::StrokeKind::Middle);
 
         if self.cfg.show_zones {
@@ -558,7 +716,7 @@ impl App {
                 ("Frankierzone", rect_mm(ew - 74.0, 0.0, ew, 38.0), true),
                 ("Codierzone (frei lassen)", rect_mm(ew - 140.0, eh - 15.0, ew, eh), true),
             ];
-            match self.cfg.destination {
+            match self.cfg.slot().destination {
                 Destination::Domestic => {
                     zones.push(("Absenderzone", rect_mm(0.0, 0.0, 120.0, 40.0), true));
                     zones.push(("Lesezone: Empfängeradresse hier hinein", rect_mm(12.0, 40.0, ew - 12.0, eh - 15.0), false));
@@ -616,11 +774,11 @@ impl App {
         }
 
         // Bild: verschieben (Fläche) und skalieren (Eckgriff unten rechts, Seitenverhältnis bleibt).
-        if let (Some(im), true) = (&self.image, self.cfg.image.show) {
-            let w_mm = self.cfg.image.width_mm;
+        if let (Some(im), true) = (&self.image, self.cfg.slot().image.show) {
+            let w_mm = self.cfg.slot().image.width_mm;
             let h_mm = w_mm * im.gfx.aspect();
             let rect = Rect::from_min_size(
-                env.min + Vec2::new(self.cfg.image.pos[0], self.cfg.image.pos[1]) * s,
+                env.min + Vec2::new(self.cfg.slot().image.pos[0], self.cfg.slot().image.pos[1]) * s,
                 Vec2::new(w_mm * s, h_mm * s),
             );
             painter.image(im.texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
@@ -638,10 +796,10 @@ impl App {
                 ui.ctx().set_cursor_icon(if body.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
             }
             if grip.dragged() {
-                self.cfg.image.width_mm = (w_mm + grip.drag_delta().x / s).clamp(5.0, ew);
+                self.cfg.slot_mut().image.width_mm = (w_mm + grip.drag_delta().x / s).clamp(5.0, ew);
             } else if body.dragged() {
                 let d = body.drag_delta() / s;
-                let pos = &mut self.cfg.image.pos;
+                let pos = &mut self.cfg.slot_mut().image.pos;
                 pos[0] = (pos[0] + d.x).clamp(0.0, ew - 5.0);
                 pos[1] = (pos[1] + d.y).clamp(0.0, eh - 5.0);
             }
@@ -651,11 +809,15 @@ impl App {
 
         // (Block-Index, Block, Platzhalter?)
         let mut blocks: Vec<(usize, Block, bool)> = vec![];
-        let empty = self.recipient_text.trim().is_empty();
-        blocks.push((0, self.block(0, if empty { PLACEHOLDER_RECIPIENT } else { &self.recipient_text }), empty));
-        if self.cfg.print_sender {
-            let empty = self.sender_text.trim().is_empty();
-            blocks.push((1, self.block(1, if empty { PLACEHOLDER_SENDER } else { &self.sender_text }), empty));
+        let (rt, st, with_sender) = {
+            let sl = self.cfg.slot();
+            (sl.recipient_text.clone(), sl.sender_text.clone(), sl.print_sender)
+        };
+        let empty = rt.trim().is_empty();
+        blocks.push((0, self.block(0, if empty { PLACEHOLDER_RECIPIENT } else { &rt }), empty));
+        if with_sender {
+            let empty = st.trim().is_empty();
+            blocks.push((1, self.block(1, if empty { PLACEHOLDER_SENDER } else { &st }), empty));
         }
 
         for (idx, b, ghost) in blocks {
@@ -690,7 +852,7 @@ impl App {
             }
             if resp.dragged() {
                 let d = resp.drag_delta() / s;
-                let pos = if idx == 1 { &mut self.cfg.sender_block.pos } else { &mut self.cfg.recipient.pos };
+                let pos = if idx == 1 { &mut self.cfg.slot_mut().sender_block.pos } else { &mut self.cfg.slot_mut().recipient.pos };
                 pos[0] = (pos[0] + d.x).clamp(0.0, ew - 5.0);
                 pos[1] = (pos[1] + d.y).clamp(0.0, eh - 5.0);
             }
@@ -873,17 +1035,13 @@ impl eframe::App for App {
         // Installierte Schriften sind geladen: Namen normalisieren, Vorschau-Schriften setzen.
         if let Some(rx) = &self.fonts_rx {
             if let Ok(sf) = rx.try_recv() {
-                for (cfg, picker) in [&mut self.cfg.recipient, &mut self.cfg.sender_block].into_iter().zip(&mut self.pickers) {
-                    // Nur erlaubte Grotesk-Schriften; sonst die Standardschrift (Helvetica, falls installiert, sonst Arial).
-                    if let Some(name) = sf
-                        .canonical_allowed(&cfg.font)
-                        .map(str::to_owned)
-                        .or_else(|| sf.default_font().map(str::to_owned))
-                    {
-                        cfg.font = name;
-                    }
-                    picker.query = cfg.font.clone();
+                // Nur erlaubte Grotesk-Schriften; sonst die Standardschrift (Helvetica, falls installiert, sonst Arial).
+                for slot in &mut self.cfg.slots {
+                    normalize_fonts(&sf, slot);
                 }
+                let active = self.cfg.slot();
+                self.pickers[0].query = active.recipient.font.clone();
+                self.pickers[1].query = active.sender_block.font.clone();
                 self.system_fonts = Some(sf);
                 self.fonts_rx = None;
                 self.fonts_dirty = true;
@@ -893,7 +1051,7 @@ impl eframe::App for App {
             fonts::apply_preview_fonts(
                 &ctx,
                 self.system_fonts.as_ref(),
-                [&self.cfg.recipient.font, &self.cfg.sender_block.font],
+                [&self.cfg.slot().recipient.font, &self.cfg.slot().sender_block.font],
             );
             self.fonts_dirty = false;
         }
@@ -930,7 +1088,7 @@ impl eframe::App for App {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let have = self.loaded.is_some();
+                    let have = self.can_print();
                     let print_btn = egui::Button::new(egui::RichText::new("Drucken…").strong().color(Color32::WHITE))
                         .fill(BUTTON_BLUE)
                         .min_size(Vec2::new(130.0, 32.0));
@@ -959,8 +1117,8 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new("Sendung:").strong());
-                    ui.selectable_value(&mut self.cfg.destination, Destination::Domestic, "Inland");
-                    ui.selectable_value(&mut self.cfg.destination, Destination::Foreign, "Ausland");
+                    ui.selectable_value(&mut self.cfg.slot_mut().destination, Destination::Domestic, "Inland");
+                    ui.selectable_value(&mut self.cfg.slot_mut().destination, Destination::Foreign, "Ausland");
                 });
                 self.preview(ui)
             });
